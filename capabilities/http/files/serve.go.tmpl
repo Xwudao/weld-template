@@ -1,0 +1,28 @@
+package app
+
+import (
+	"flag"
+	"os"
+
+	httpserver "__module__/internal/httpserver"
+)
+
+func init() {
+	RegisterCommand(Command{
+		Name:    "serve",
+		Summary: "start the HTTP server for the installed capabilities",
+		Run:     runServe,
+	})
+}
+
+// runServe starts the HTTP server that serves every route the installed
+// capabilities contributed to internal/httpserver.
+func runServe(args []string) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	addr := flags.String("addr", ":8080", "address to listen on")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	return httpserver.Serve(*addr, httpserver.Handler())
+}

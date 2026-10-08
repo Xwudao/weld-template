@@ -5,8 +5,8 @@ APP := __name__
 build: web-build ## Build the binary into bin/
 	go build -o bin/$(APP) .
 
-run: ## Run the app (serves http://localhost:8080)
-	go run . serve
+run: ## Run the app (pass subcommand arguments with ARGS, e.g. make run ARGS=help)
+	go run . $(ARGS)
 
 test: ## Run the Go tests
 	go test ./...
@@ -17,3 +17,6 @@ fmt: ## Format Go sources
 web-build: ## Build the web frontend (filled in by: weld add web)
 # weld:web:begin
 # weld:web:end
+
+# weld:db:begin
+# weld:db:end

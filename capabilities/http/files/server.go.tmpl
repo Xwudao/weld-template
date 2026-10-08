@@ -1,0 +1,38 @@
+package httpserver
+
+import (
+	"fmt"
+	nethttp "net/http"
+	"os"
+	"time"
+)
+
+// readHeaderTimeout bounds how long a client may take to send request headers.
+const readHeaderTimeout = 5 * time.Second
+
+// NewServer builds the HTTP server for handler without starting it.
+//
+// It is separate from Serve so tests can inspect the configured server without
+// binding a socket.
+func NewServer(addr string, handler nethttp.Handler) *nethttp.Server {
+	return &nethttp.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
+}
+
+// Serve listens on addr and serves handler until the server fails.
+func Serve(addr string, handler nethttp.Handler) error {
+	server := NewServer(addr, handler)
+	fmt.Fprintf(os.Stderr, "__name__ listening on http://%s\n", displayAddr(addr))
+	return server.ListenAndServe()
+}
+
+// displayAddr turns a listen address into something clickable.
+func displayAddr(addr string) string {
+	if addr != "" && addr[0] == ':' {
+		return "localhost" + addr
+	}
+	return addr
+}

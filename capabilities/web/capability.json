@@ -2,8 +2,8 @@
   "name": "web",
   "version": "0.1.0",
   "kind": "add",
-  "summary": "React + TypeScript + Vite frontend, embedded into the app's assets.",
-  "requires": ["base"],
+  "summary": "React + TypeScript + Vite frontend, served by the http capability.",
+  "requires": ["http"],
   "files": [
     { "path": "web/package.json", "source": "files/package.json" },
     { "path": "web/vite.config.ts", "source": "files/vite.config.ts" },
@@ -12,11 +12,15 @@
     { "path": "web/src/main.tsx", "source": "files/main.tsx" },
     { "path": "web/src/App.tsx", "source": "files/App.tsx" },
     { "path": "web/src/index.css", "source": "files/index.css" },
-    { "path": "internal/server/assets_web.go", "source": "files/assets_web.go.tmpl" },
-    { "path": "internal/server/dist/.gitkeep", "source": "files/dist.gitkeep" }
+    { "path": "internal/web/web.go", "source": "files/web.go.tmpl" },
+    { "path": "internal/web/assets.go", "source": "files/assets.go.tmpl" },
+    { "path": "internal/web/web_test.go", "source": "files/web_test.go.tmpl" },
+    { "path": "internal/web/dist/.gitkeep", "source": "files/dist.gitkeep" },
+    { "path": "internal/httpserver/web_route.go", "source": "files/web_route.go.tmpl" }
   ],
   "patches": [
     { "path": "Makefile", "marker": "web", "source": "files/Makefile.snippet" },
-    { "path": ".gitignore", "marker": "web", "source": "files/gitignore.snippet" }
+    { "path": ".gitignore", "marker": "web", "source": "files/gitignore.snippet" },
+    { "path": "internal/httpserver/http.go", "marker": "routes", "source": "files/routes.snippet" }
   ]
 }

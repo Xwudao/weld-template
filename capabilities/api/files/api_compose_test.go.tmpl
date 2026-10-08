@@ -1,0 +1,53 @@
+package httpserver
+
+import (
+	"encoding/json"
+	"io"
+	nethttp "net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// The tests here exercise the composed application handler (Handler), not the
+// API package in isolation, so they prove the api capability is wired into the
+// weld:routes extension point. They do not need a socket.
+
+func composeRequest(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	recorder := httptest.NewRecorder()
+	Handler().ServeHTTP(recorder, httptest.NewRequest(method, target, reader))
+	return recorder
+}
+
+func TestComposedHandlerServesAPI(t *testing.T) {
+	recorder := composeRequest(t, nethttp.MethodGet, "/api/openapi.json", "")
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+		t.Fatalf("openapi document is not JSON: %v", err)
+	}
+	if document["openapi"] != "3.1.0" {
+		t.Fatalf("openapi = %v, want 3.1.0", document["openapi"])
+	}
+}
+
+// TestComposedHandlerKeepsAPIPathsOffTheSPA proves route precedence: the /api/
+// subtree never falls through to the SPA catch-all, in either capability order.
+// With web installed the SPA excludes /api/; without it the mux has no matching
+// route. Either way an unknown API path is a not-found, never the HTML shell.
+func TestComposedHandlerKeepsAPIPathsOffTheSPA(t *testing.T) {
+	recorder := composeRequest(t, nethttp.MethodGet, "/api/unknown", "")
+	if recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if strings.Contains(strings.ToLower(recorder.Header().Get("Content-Type")), "text/html") {
+		t.Fatalf("API path received the SPA: %s", recorder.Body)
+	}
+}

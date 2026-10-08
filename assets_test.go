@@ -4,15 +4,17 @@ import (
 	"encoding/json"
 	"io/fs"
 	"path"
+	"strings"
 	"testing"
 )
 
 type descriptor struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Kind    string `json:"kind"`
-	Summary string `json:"summary"`
-	Files   []struct {
+	Name     string   `json:"name"`
+	Version  string   `json:"version"`
+	Kind     string   `json:"kind"`
+	Summary  string   `json:"summary"`
+	Requires []string `json:"requires"`
+	Files    []struct {
 		Path   string `json:"path"`
 		Source string `json:"source"`
 	} `json:"files"`
@@ -21,6 +23,19 @@ type descriptor struct {
 		Marker string `json:"marker"`
 		Source string `json:"source"`
 	} `json:"patches"`
+}
+
+func readDescriptor(t *testing.T, name string) descriptor {
+	t.Helper()
+	raw, err := fs.ReadFile(FS(), path.Join("capabilities", name, "capability.json"))
+	if err != nil {
+		t.Fatalf("%s: read descriptor: %v", name, err)
+	}
+	var d descriptor
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("%s: invalid descriptor: %v", name, err)
+	}
+	return d
 }
 
 func TestCapabilitiesAreWellFormed(t *testing.T) {
@@ -39,14 +54,7 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 		}
 		name := entry.Name()
 		dir := path.Join("capabilities", name)
-		raw, err := fs.ReadFile(fsys, path.Join(dir, "capability.json"))
-		if err != nil {
-			t.Fatalf("%s: read descriptor: %v", name, err)
-		}
-		var d descriptor
-		if err := json.Unmarshal(raw, &d); err != nil {
-			t.Fatalf("%s: invalid descriptor: %v", name, err)
-		}
+		d := readDescriptor(t, name)
 		if d.Name != name {
 			t.Errorf("%s: descriptor name is %q", name, d.Name)
 		}
@@ -85,25 +93,308 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 	}
 }
 
-func TestWebCapabilityDeclaresBaseRequirement(t *testing.T) {
-	raw, err := fs.ReadFile(FS(), "capabilities/web/capability.json")
-	if err != nil {
-		t.Fatalf("read web capability: %v", err)
+func TestWebCapabilityRequiresHTTP(t *testing.T) {
+	d := readDescriptor(t, "web")
+	if len(d.Requires) != 1 || d.Requires[0] != "http" {
+		t.Fatalf("web requires = %v, want [http]", d.Requires)
 	}
-	var d struct {
-		Requires []string `json:"requires"`
-		Patches  []struct {
-			Path   string `json:"path"`
-			Marker string `json:"marker"`
-		} `json:"patches"`
+	if len(d.Patches) != 3 {
+		t.Fatalf("web patches = %d, want 3", len(d.Patches))
 	}
-	if err := json.Unmarshal(raw, &d); err != nil {
-		t.Fatalf("invalid descriptor: %v", err)
+	var routes bool
+	for _, file := range d.Files {
+		if file.Path == "internal/app/serve.go" {
+			t.Error("web still ships a serve command file")
+		}
+	}
+	for _, patch := range d.Patches {
+		if patch.Marker == "routes" && patch.Path == "internal/httpserver/http.go" {
+			routes = true
+		}
+	}
+	if !routes {
+		t.Error("web does not patch the httpserver routes extension point")
+	}
+}
+
+func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
+	d := readDescriptor(t, "http")
+	if d.Kind != "add" {
+		t.Fatalf("http kind = %q, want add", d.Kind)
 	}
 	if len(d.Requires) != 1 || d.Requires[0] != "base" {
-		t.Fatalf("web requires = %v, want [base]", d.Requires)
+		t.Fatalf("http requires = %v, want [base]", d.Requires)
 	}
-	if len(d.Patches) != 2 {
-		t.Fatalf("web patches = %d, want 2", len(d.Patches))
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/httpserver/http.go",
+		"internal/httpserver/server.go",
+		"internal/app/serve.go",
+	} {
+		if !paths[want] {
+			t.Errorf("http capability does not ship %s", want)
+		}
+	}
+	if len(d.Patches) != 0 {
+		t.Errorf("http patches = %d, want 0", len(d.Patches))
+	}
+}
+
+// TestAPICapabilityRequiresHTTP guards the API capability's contract: it needs
+// http, patches the go.mod dependency region and the httpserver routes region,
+// and depends on neither web nor any database.
+func TestAPICapabilityRequiresHTTP(t *testing.T) {
+	d := readDescriptor(t, "api")
+	if d.Kind != "add" {
+		t.Fatalf("api kind = %q, want add", d.Kind)
+	}
+	if len(d.Requires) != 1 || d.Requires[0] != "http" {
+		t.Fatalf("api requires = %v, want [http]", d.Requires)
+	}
+	for _, forbidden := range []string{"web", "db", "loom"} {
+		for _, required := range d.Requires {
+			if required == forbidden {
+				t.Errorf("api requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/api/dto.go",
+		"internal/api/service.go",
+		"internal/api/handler.go",
+		"internal/api/openapi.go",
+		"internal/httpserver/api_route.go",
+	} {
+		if !paths[want] {
+			t.Errorf("api capability does not ship %s", want)
+		}
+	}
+	var deps, routes bool
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			deps = true
+		case patch.Path == "internal/httpserver/http.go" && patch.Marker == "routes":
+			routes = true
+		}
+	}
+	if !deps {
+		t.Error("api does not patch the go.mod dependency region")
+	}
+	if !routes {
+		t.Error("api does not patch the httpserver routes extension point")
+	}
+}
+
+// TestDBCapabilityIsIndependent guards the db capability's contract: it needs
+// only base (never http, web, api or loom), patches the go.mod dependency region
+// and the Makefile db region, and ships the SQL sources, the pinned sqlc tool
+// module, the generated sqlc package and a repository.
+func TestDBCapabilityIsIndependent(t *testing.T) {
+	d := readDescriptor(t, "db")
+	if d.Kind != "add" {
+		t.Fatalf("db kind = %q, want add", d.Kind)
+	}
+	if len(d.Requires) != 1 || d.Requires[0] != "base" {
+		t.Fatalf("db requires = %v, want [base]", d.Requires)
+	}
+	for _, forbidden := range []string{"http", "web", "api", "loom"} {
+		for _, required := range d.Requires {
+			if required == forbidden {
+				t.Errorf("db requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"sqlc.yaml",
+		"db/migrations/000001_create_items.sql",
+		"db/query/items.sql",
+		"db/tools/go.mod",
+		"db/tools/go.sum",
+		"internal/data/data.go",
+		"internal/data/sqlc/db.go",
+		"internal/data/sqlc/models.go",
+		"internal/data/sqlc/items.sql.go",
+		"internal/data/data_test.go",
+		"internal/data/postgres_integration_test.go",
+		"internal/data/README.md",
+	} {
+		if !paths[want] {
+			t.Errorf("db capability does not ship %s", want)
+		}
+	}
+	var deps, makefile bool
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			deps = true
+		case patch.Path == "Makefile" && patch.Marker == "db":
+			makefile = true
+		}
+	}
+	if !deps {
+		t.Error("db does not patch the go.mod dependency region")
+	}
+	if !makefile {
+		t.Error("db does not patch the Makefile db extension point")
+	}
+}
+
+// TestDBCapabilityPayloadsAreSqlcOutputAndPinnedTool checks the pieces that make
+// the capability reproducible: the generated package really is sqlc output, the
+// sqlc tool version is pinned in a nested module, and pgx/v5 is pinned in the
+// go.mod snippet.
+func TestDBCapabilityPayloadsAreSqlcOutputAndPinnedTool(t *testing.T) {
+	for _, file := range []string{
+		"capabilities/db/files/sqlc/db.go.tmpl",
+		"capabilities/db/files/sqlc/models.go.tmpl",
+		"capabilities/db/files/sqlc/items.sql.go.tmpl",
+	} {
+		raw, err := fs.ReadFile(FS(), file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if !strings.Contains(string(raw), "Code generated by sqlc. DO NOT EDIT.") {
+			t.Errorf("%s is not sqlc output", file)
+		}
+	}
+	toolsMod, err := fs.ReadFile(FS(), "capabilities/db/files/tools/go.mod.tmpl")
+	if err != nil {
+		t.Fatalf("read db/tools go.mod: %v", err)
+	}
+	// Strip comments so the checks below assert the actual directives, not the
+	// explanatory header.
+	var toolsModCode []string
+	for _, line := range strings.Split(string(toolsMod), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		toolsModCode = append(toolsModCode, line)
+	}
+	toolsModText := strings.Join(toolsModCode, "\n")
+	for _, want := range []string{
+		"github.com/sqlc-dev/sqlc/cmd/sqlc",
+		"github.com/pressly/goose/v3/cmd/goose",
+		"github.com/sqlc-dev/sqlc v1.31.1 // indirect",
+		"github.com/pressly/goose/v3 v3.28.0 // indirect",
+	} {
+		if !strings.Contains(toolsModText, want) {
+			t.Errorf("db/tools go.mod is missing %q", want)
+		}
+	}
+	if !strings.Contains(toolsModText, "__module__/db/tools") {
+		t.Error("db/tools go.mod does not use the project module placeholder")
+	}
+	snippet, err := fs.ReadFile(FS(), "capabilities/db/files/go.mod.snippet")
+	if err != nil {
+		t.Fatalf("read db go.mod snippet: %v", err)
+	}
+	if !strings.Contains(string(snippet), "require github.com/jackc/pgx/v5 v5.7.6") {
+		t.Errorf("db go.mod snippet does not pin pgx/v5:\n%s", snippet)
+	}
+}
+
+// TestDBCapabilityMigrationAndTestSafety guards the destructive-operation
+// guardrails: the generated migration targets must use the pinned goose tool
+// with an explicit DATABASE_URL guard and a one-step, confirmed down, and the
+// generated integration test must isolate itself in its own schema instead of
+// dropping application tables.
+func TestDBCapabilityMigrationAndTestSafety(t *testing.T) {
+	makefile, err := fs.ReadFile(FS(), "capabilities/db/files/Makefile.snippet")
+	if err != nil {
+		t.Fatalf("read db Makefile snippet: %v", err)
+	}
+	makeText := string(makefile)
+	if strings.Contains(makeText, "psql") {
+		t.Errorf("db Makefile snippet still shells out to psql:\n%s", makeText)
+	}
+	for _, want := range []string{
+		"go tool goose",
+		`test -n "$$DATABASE_URL"`,
+		"CONFIRM",
+		"migrate-status:",
+	} {
+		if !strings.Contains(makeText, want) {
+			t.Errorf("db Makefile snippet is missing %q:\n%s", want, makeText)
+		}
+	}
+	// The down target must revert one migration, never every migration.
+	if strings.Contains(makeText, "rolls back ALL") || strings.Contains(makeText, "-all") {
+		t.Errorf("db Makefile snippet rolls back more than one migration:\n%s", makeText)
+	}
+
+	toolsMod, err := fs.ReadFile(FS(), "capabilities/db/files/tools/go.mod.tmpl")
+	if err != nil {
+		t.Fatalf("read db/tools go.mod: %v", err)
+	}
+	if !strings.Contains(string(toolsMod), "tool github.com/pressly/goose/v3/cmd/goose") {
+		t.Errorf("the goose migration tool is not pinned in db/tools:\n%s", toolsMod)
+	}
+
+	migration, err := fs.ReadFile(FS(), "capabilities/db/files/migrations/000001_create_items.sql")
+	if err != nil {
+		t.Fatalf("read db migration: %v", err)
+	}
+	for _, want := range []string{"-- +goose Up", "-- +goose Down"} {
+		if !strings.Contains(string(migration), want) {
+			t.Errorf("db migration is missing %q:\n%s", want, migration)
+		}
+	}
+
+	test, err := fs.ReadFile(FS(), "capabilities/db/files/postgres_integration_test.go.tmpl")
+	if err != nil {
+		t.Fatalf("read db integration test: %v", err)
+	}
+	testText := string(test)
+	if strings.Contains(testText, "DROP TABLE") {
+		t.Errorf("db integration test drops tables outside its own schema:\n%s", testText)
+	}
+	for _, want := range []string{
+		"CREATE SCHEMA",
+		"search_path",
+		"DROP SCHEMA",
+		"CASCADE",
+		"PG_TEST_DSN",
+	} {
+		if !strings.Contains(testText, want) {
+			t.Errorf("db integration test is missing %q", want)
+		}
+	}
+}
+
+// TestBaseCapabilityIsCLIOnly guards the base scaffold against re-acquiring
+// server or frontend payloads, which would break capability independence.
+func TestBaseCapabilityIsCLIOnly(t *testing.T) {
+	d := readDescriptor(t, "base")
+	for _, file := range d.Files {
+		switch {
+		case file.Path == "internal/app/serve.go" ||
+			strings.HasPrefix(file.Path, "internal/httpserver/") ||
+			strings.HasPrefix(file.Path, "internal/web/") ||
+			strings.HasPrefix(file.Path, "web/"):
+			t.Errorf("base capability ships capability-specific file %q", file.Path)
+		}
+		raw, err := fs.ReadFile(FS(), path.Join("capabilities/base", file.Source))
+		if err != nil {
+			t.Fatalf("read base payload %q: %v", file.Source, err)
+		}
+		content := string(raw)
+		if strings.Contains(content, "net/http") {
+			t.Errorf("base payload %q imports net/http", file.Source)
+		}
+		if strings.Contains(content, "/api/health") {
+			t.Errorf("base payload %q mentions the API health endpoint", file.Source)
+		}
 	}
 }

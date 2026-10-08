@@ -2,15 +2,12 @@
   "name": "base",
   "version": "0.1.0",
   "kind": "base",
-  "summary": "Minimal Go CLI with an HTTP serve command and an asset extension point.",
+  "summary": "Minimal, dependency-free Go CLI with a command-registry extension point.",
   "requires": [],
   "files": [
     { "path": "go.mod", "source": "files/go.mod.tmpl" },
     { "path": "main.go", "source": "files/main.go.tmpl" },
     { "path": "internal/app/app.go", "source": "files/app.go.tmpl" },
-    { "path": "internal/app/serve.go", "source": "files/serve.go.tmpl" },
-    { "path": "internal/server/server.go", "source": "files/server.go.tmpl" },
-    { "path": "internal/server/assets.go", "source": "files/assets.go.tmpl" },
     { "path": "Makefile", "source": "files/Makefile.tmpl" },
     { "path": "README.md", "source": "files/README.md.tmpl" },
     { "path": ".gitignore", "source": "files/gitignore.txt" }

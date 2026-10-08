@@ -1,0 +1,47 @@
+// Package httpserver owns the HTTP surface of __name__: the server lifecycle
+// and the composable handler builder that capabilities extend.
+//
+// The base CLI never imports this package. "weld add" installs the http
+// capability (with any other capability that requires it), and capabilities
+// register their routes through Handler rather than at init time.
+package httpserver
+
+import (
+	nethttp "net/http"
+)
+
+// Route installs one capability's routes on the application mux.
+type Route func(mux *nethttp.ServeMux)
+
+// NewHandler builds a handler from the given routes.
+//
+// It is the injectable seam for tests: pass routes directly to exercise the mux
+// without installing a capability or opening a socket. Production code calls
+// Handler, which supplies the routes contributed through the weld:routes
+// extension point below.
+func NewHandler(routes ...Route) nethttp.Handler {
+	mux := nethttp.NewServeMux()
+	for _, route := range routes {
+		route(mux)
+	}
+	return mux
+}
+
+// Handler returns the application handler composed from every capability
+// installed in this build.
+//
+// Capabilities append their Route inside the weld:routes extension point, so
+// composition is explicit and needs no init-time route registration. Route
+// order does not matter: net/http resolves the most specific pattern first, so
+// a catch-all "/" and a subtree such as "/api/" coexist either way. A handler
+// mounted on "/" that must not answer API paths excludes them itself (see
+// internal/web) instead of relying on that precedence.
+//
+// With no capability installed, the mux serves nothing and returns 404 for
+// every request.
+func Handler() nethttp.Handler {
+	var routes []Route
+	// weld:routes:begin
+	// weld:routes:end
+	return NewHandler(routes...)
+}

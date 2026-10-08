@@ -1,0 +1,41 @@
+package httpserver
+
+import (
+	nethttp "net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
+	handler := NewHandler(func(mux *nethttp.ServeMux) {
+		mux.HandleFunc("/ping", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+			w.WriteHeader(nethttp.StatusTeapot)
+		})
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/ping", nil))
+	if recorder.Code != nethttp.StatusTeapot {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusTeapot)
+	}
+}
+
+func TestNewHandlerWithoutRoutesServesNothing(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	NewHandler().ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/", nil))
+	if recorder.Code != nethttp.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, nethttp.StatusNotFound)
+	}
+}
+
+func TestNewServerConfiguresWithoutListening(t *testing.T) {
+	server := NewServer("127.0.0.1:0", NewHandler())
+	if server.Addr != "127.0.0.1:0" {
+		t.Fatalf("Addr = %q", server.Addr)
+	}
+	if server.Handler == nil {
+		t.Fatal("Handler is nil")
+	}
+	if server.ReadHeaderTimeout <= 0 {
+		t.Fatal("ReadHeaderTimeout is not set")
+	}
+}
