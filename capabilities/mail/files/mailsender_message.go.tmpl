@@ -1,0 +1,138 @@
+package mailsender
+
+// Message assembly: the SMTP envelope addresses and the MIME body. Every value
+// that becomes an SMTP header is checked for a newline before it is written, so
+// a crafted recipient or subject cannot inject a header.
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net/mail"
+	"net/textproto"
+	"strings"
+	"time"
+)
+
+// parseAddress parses one address and returns its bare form for the SMTP
+// envelope. The error is generic: an invalid address is never echoed, so a
+// crafted value cannot smuggle content into a log or an error.
+func parseAddress(value string) (string, error) {
+	address, err := mail.ParseAddress(value)
+	if err != nil {
+		return "", errors.New("invalid address")
+	}
+	return address.Address, nil
+}
+
+// headerSafe rejects a value that would break out of its header. It is the
+// header-injection guard for the subject and the raw recipient lists.
+func headerSafe(field, value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("mailsender: %s must not contain a header newline", field)
+	}
+	return nil
+}
+
+// buildMessage renders one RFC 5322 message. When both Text and HTML are set it
+// is a multipart/alternative with a text/plain part followed by a text/html
+// part; with a single body it is a single part of that type. fromHeader is
+// already validated and is written verbatim so a display name survives.
+func buildMessage(msg Message, fromHeader string) ([]byte, error) {
+	if err := headerSafe("subject", msg.Subject); err != nil {
+		return nil, err
+	}
+	for _, recipient := range append(append([]string{}, msg.To...), msg.Cc...) {
+		if err := headerSafe("recipient", recipient); err != nil {
+			return nil, err
+		}
+	}
+	if msg.Text == "" && msg.HTML == "" {
+		return nil, errors.New("mailsender: a message needs text or HTML content")
+	}
+
+	var body bytes.Buffer
+	writeHeader := func(key, value string) {
+		fmt.Fprintf(&body, "%s: %s\r\n", key, value)
+	}
+	writeHeader("From", fromHeader)
+	if len(msg.To) > 0 {
+		writeHeader("To", strings.Join(msg.To, ", "))
+	}
+	if len(msg.Cc) > 0 {
+		writeHeader("Cc", strings.Join(msg.Cc, ", "))
+	}
+	writeHeader("Subject", mime.QEncoding.Encode("utf-8", msg.Subject))
+	writeHeader("Date", time.Now().Format(time.RFC1123Z))
+	writeHeader("MIME-Version", "1.0")
+
+	switch {
+	case msg.Text != "" && msg.HTML != "":
+		writer := multipart.NewWriter(&body)
+		writeHeader("Content-Type", "multipart/alternative; boundary="+writer.Boundary())
+		body.WriteString("\r\n")
+		if err := writePart(writer, "text/plain; charset=utf-8", msg.Text); err != nil {
+			return nil, err
+		}
+		if err := writePart(writer, "text/html; charset=utf-8", msg.HTML); err != nil {
+			return nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+	case msg.HTML != "":
+		encoded, err := encodeQuotedPrintable(msg.HTML)
+		if err != nil {
+			return nil, err
+		}
+		writeHeader("Content-Type", "text/html; charset=utf-8")
+		writeHeader("Content-Transfer-Encoding", "quoted-printable")
+		body.WriteString("\r\n")
+		body.WriteString(encoded)
+	default:
+		encoded, err := encodeQuotedPrintable(msg.Text)
+		if err != nil {
+			return nil, err
+		}
+		writeHeader("Content-Type", "text/plain; charset=utf-8")
+		writeHeader("Content-Transfer-Encoding", "quoted-printable")
+		body.WriteString("\r\n")
+		body.WriteString(encoded)
+	}
+	return body.Bytes(), nil
+}
+
+// encodeQuotedPrintable encodes one body part as quoted-printable, the safe
+// 7-bit transport encoding that does not depend on the server advertising
+// 8BITMIME. Line breaks are CRLF and long lines are soft-wrapped.
+func encodeQuotedPrintable(content string) (string, error) {
+	var encoded bytes.Buffer
+	writer := quotedprintable.NewWriter(&encoded)
+	if _, err := writer.Write([]byte(content)); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	return encoded.String(), nil
+}
+
+// writePart writes one part of the multipart/alternative body.
+func writePart(writer *multipart.Writer, contentType, content string) error {
+	encoded, err := encodeQuotedPrintable(content)
+	if err != nil {
+		return err
+	}
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Type", contentType)
+	header.Set("Content-Transfer-Encoding", "quoted-printable")
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	_, err = part.Write([]byte(encoded))
+	return err
+}

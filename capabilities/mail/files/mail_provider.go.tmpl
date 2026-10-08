@@ -1,0 +1,27 @@
+package di
+
+import (
+	"__module__/internal/config"
+	"__module__/internal/mailsender"
+)
+
+// NewMailSender is the optional SMTP sender provider, and this file is the
+// stable integration seam for wiring mail into the Loom application.
+//
+// weld writes this file once, when both the mail and loom capabilities are
+// installed, and never rewrites it while it regenerates the graph (di.go,
+// loom_gen.go): edits below survive every later `weld add`.
+//
+// Construction never sends and never connects: mailsender.New only validates
+// the mail section and stores the settings, and the sender dials the SMTP server
+// once per Send. There is no queue and no outbox, so this provider needs no
+// lifecycle cleanup.
+//
+// The mail capability deliberately edits no shared Loom file, so unlike
+// NewRedisClient this provider is not declared by the generated graph. To switch
+// it on, add `loom.Provide(NewMailSender)` to the graph in internal/di/di.go
+// after installing, then make a provider the graph already consumes depend on
+// *mailsender.Sender. See internal/mailsender/README.md for the exact steps.
+func NewMailSender(cfg *config.Config) (*mailsender.Sender, error) {
+	return mailsender.New(cfg)
+}

@@ -1,0 +1,257 @@
+// Package mailsender sends mail through an SMTP server built from the typed
+// application configuration.
+//
+// It is opt-in and explicit: nothing in the generated application imports this
+// package, and constructing a Sender sends nothing and opens no connection.
+// Every Send dials the configured server, authenticates when credentials are
+// configured, writes the message and quits, so there is no connection pool, no
+// background goroutine, no queue and no outbox. The caller owns the lifecycle of
+// each call and passes a context that bounds it.
+package mailsender
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"net"
+	"net/smtp"
+	"strconv"
+	"strings"
+	"time"
+
+	"__module__/internal/config"
+)
+
+// Provider supplies the SMTP settings the sender uses.
+//
+// *config.Config satisfies it today through MailSettings, so the sender reads
+// config.yml and the environment without knowing either. A future
+// database-backed site configuration implements this one method and replaces the
+// YAML source without changing the sender, this package or its tests.
+type Provider interface {
+	MailSettings() config.Mail
+}
+
+// Message is one outgoing message. From is optional: when empty the configured
+// sender address is used. Bcc recipients receive the message but never appear in
+// its headers.
+type Message struct {
+	From    string
+	To      []string
+	Cc      []string
+	Bcc     []string
+	Subject string
+	Text    string
+	HTML    string
+}
+
+// Sender sends messages through the configured SMTP server. It is safe to keep
+// and reuse: it holds only the settings, and Send opens a fresh connection each
+// time.
+type Sender struct {
+	settings config.Mail
+	// tlsConfig overrides the production TLS configuration. It is nil in
+	// production; a test sets it to trust its own in-process server certificate.
+	tlsConfig *tls.Config
+}
+
+// New builds a Sender from provider. It validates the mail section, sends
+// nothing and opens no connection: the server is dialed only inside Send. The
+// username and password come from the redacting config.Secret and are never
+// logged or echoed in an error.
+func New(provider Provider) (*Sender, error) {
+	if provider == nil {
+		return nil, errors.New("mailsender: provider is required")
+	}
+	settings := provider.MailSettings()
+	if err := (&config.Config{Mail: settings}).ValidateMail(); err != nil {
+		return nil, err
+	}
+	return &Sender{settings: settings}, nil
+}
+
+// Send delivers one message over SMTP. It dials, applies the configured TLS
+// policy, authenticates when credentials are set, submits the message and
+// quits. ctx bounds the whole call; a canceled or expired ctx aborts it. The
+// configured timeout also bounds the dial.
+func (s *Sender) Send(ctx context.Context, msg Message) error {
+	if s == nil {
+		return errors.New("mailsender: nil sender")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings := s.settings
+	if err := (&config.Config{Mail: settings}).ValidateMail(); err != nil {
+		return err
+	}
+
+	fromHeader, envelopeFrom, err := senderAddress(msg.From, settings.From)
+	if err != nil {
+		return err
+	}
+	envelopeTo, err := recipientAddresses(msg.To, msg.Cc, msg.Bcc)
+	if err != nil {
+		return err
+	}
+	body, err := buildMessage(msg, fromHeader)
+	if err != nil {
+		return err
+	}
+
+	timeout := time.Duration(settings.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Duration(config.DefaultMailTimeoutSeconds) * time.Second
+	}
+	client, err := s.connect(ctx, timeout)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if settings.Username.Value() != "" || settings.Password.Value() != "" {
+		auth := smtp.PlainAuth("", settings.Username.Value(), settings.Password.Value(), settings.Host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("mailsender: authenticate: %w", err)
+		}
+	}
+	if err := client.Mail(envelopeFrom); err != nil {
+		return fmt.Errorf("mailsender: MAIL FROM: %w", err)
+	}
+	for _, rcpt := range envelopeTo {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("mailsender: RCPT TO: %w", err)
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("mailsender: DATA: %w", err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("mailsender: write body: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("mailsender: finish body: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("mailsender: QUIT: %w", err)
+	}
+	return nil
+}
+
+// connect dials the server and applies the TLS policy. It never upgrades
+// opportunistically: none leaves the connection plain, starttls requires the
+// server to advertise STARTTLS and fails otherwise, and implicit wraps the
+// connection before the SMTP greeting.
+func (s *Sender) connect(ctx context.Context, timeout time.Duration) (*smtp.Client, error) {
+	settings := s.settings
+	host := strings.TrimSpace(settings.Host)
+	addr := net.JoinHostPort(host, strconv.Itoa(settings.Port))
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("mailsender: dial %s: %w", addr, err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("mailsender: set deadline: %w", err)
+	}
+
+	if settings.TLS == config.MailTLSImplicit {
+		tlsConn := tls.Client(conn, s.tlsConfigFor(host))
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("mailsender: implicit TLS handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("mailsender: SMTP greeting: %w", err)
+	}
+	if settings.TLS == config.MailTLSStartTLS {
+		if supported, _ := client.Extension("STARTTLS"); !supported {
+			_ = client.Close()
+			return nil, errors.New("mailsender: server does not advertise STARTTLS")
+		}
+		if err := client.StartTLS(s.tlsConfigFor(host)); err != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("mailsender: STARTTLS: %w", err)
+		}
+	}
+	return client, nil
+}
+
+// tlsConfigFor returns the TLS configuration for host. Production requires TLS
+// 1.2 or newer and verifies the server certificate; a test may override it to
+// trust an in-process server.
+func (s *Sender) tlsConfigFor(host string) *tls.Config {
+	if s.tlsConfig != nil {
+		return s.tlsConfig.Clone()
+	}
+	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+}
+
+// senderAddress resolves the From header and the SMTP envelope sender. An empty
+// message From falls back to the configured sender. The value must be a single
+// address with no header newline.
+func senderAddress(messageFrom, configuredFrom string) (header, envelope string, err error) {
+	from := strings.TrimSpace(messageFrom)
+	if from == "" {
+		from = strings.TrimSpace(configuredFrom)
+	}
+	address, err := singleAddress(from)
+	if err != nil {
+		return "", "", fmt.Errorf("mailsender: from: %w", err)
+	}
+	return from, address, nil
+}
+
+// recipientAddresses returns the SMTP envelope recipients, in To, Cc, Bcc
+// order. It fails when there is no recipient or any address carries a header
+// newline.
+func recipientAddresses(to, cc, bcc []string) ([]string, error) {
+	all := make([]string, 0, len(to)+len(cc)+len(bcc))
+	all = append(all, to...)
+	all = append(all, cc...)
+	all = append(all, bcc...)
+	if len(all) == 0 {
+		return nil, errors.New("mailsender: at least one recipient is required")
+	}
+	addresses := make([]string, 0, len(all))
+	for _, recipient := range all {
+		address, err := singleAddress(recipient)
+		if err != nil {
+			return nil, fmt.Errorf("mailsender: recipient: %w", err)
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses, nil
+}
+
+// singleAddress trims one address, rejects an empty value and any header
+// newline, and parses it so the envelope carries a bare address. It is the
+// header-injection guard for every value that becomes SMTP input.
+func singleAddress(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", errors.New("address must not be blank")
+	}
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return "", errors.New("address must not contain a header newline")
+	}
+	parsed, err := parseAddress(trimmed)
+	if err != nil {
+		return "", err
+	}
+	return parsed, nil
+}
