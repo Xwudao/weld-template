@@ -1,0 +1,48 @@
+// Package server exposes the HTTP surface of __name__.
+package server
+
+import (
+	"encoding/json"
+	"io/fs"
+	"net/http"
+	"strings"
+)
+
+// New returns the application HTTP handler. The web capability registers an
+// embedded frontend through RegisterAssets; without it only the API is served.
+func New() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/health", handleHealth)
+	if assets := assetFS(); assets != nil {
+		mux.Handle("/", newSPAHandler(assets))
+	} else {
+		mux.HandleFunc("/", handleNoWeb)
+	}
+	return mux
+}
+
+func handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handleNoWeb(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "web capability is not installed", http.StatusNotFound)
+}
+
+// newSPAHandler serves files from assets and falls back to index.html so that
+// client-side routes keep working.
+func newSPAHandler(assets fs.FS) http.Handler {
+	files := http.FileServer(http.FS(assets))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if _, err := fs.Stat(assets, name); err != nil {
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+		}
+		files.ServeHTTP(w, r)
+	})
+}

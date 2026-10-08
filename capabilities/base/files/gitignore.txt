@@ -1,0 +1,4 @@
+/bin/
+*.log
+# weld:web:begin
+# weld:web:end

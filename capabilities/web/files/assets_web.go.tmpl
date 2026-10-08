@@ -1,0 +1,20 @@
+package server
+
+import (
+	"embed"
+	"io/fs"
+)
+
+// The web capability build output is embedded here. `all:` keeps the embed
+// valid even when dist only contains the tracked .gitkeep placeholder.
+//
+//go:embed all:dist
+var webDist embed.FS
+
+func init() {
+	dist, err := fs.Sub(webDist, "dist")
+	if err != nil {
+		panic("weld web: embed dist: " + err.Error())
+	}
+	RegisterAssets(func() fs.FS { return dist })
+}

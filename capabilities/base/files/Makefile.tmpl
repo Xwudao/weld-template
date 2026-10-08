@@ -1,0 +1,19 @@
+APP := __name__
+
+.PHONY: build run test fmt web-build
+
+build: web-build ## Build the binary into bin/
+	go build -o bin/$(APP) .
+
+run: ## Run the app (serves http://localhost:8080)
+	go run . serve
+
+test: ## Run the Go tests
+	go test ./...
+
+fmt: ## Format Go sources
+	go fmt ./...
+
+web-build: ## Build the web frontend (filled in by: weld add web)
+# weld:web:begin
+# weld:web:end

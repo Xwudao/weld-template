@@ -1,0 +1,22 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "kind": "add",
+  "summary": "React + TypeScript + Vite frontend, embedded into the app's assets.",
+  "requires": ["base"],
+  "files": [
+    { "path": "web/package.json", "source": "files/package.json" },
+    { "path": "web/vite.config.ts", "source": "files/vite.config.ts" },
+    { "path": "web/tsconfig.json", "source": "files/tsconfig.json" },
+    { "path": "web/index.html", "source": "files/index.html" },
+    { "path": "web/src/main.tsx", "source": "files/main.tsx" },
+    { "path": "web/src/App.tsx", "source": "files/App.tsx" },
+    { "path": "web/src/index.css", "source": "files/index.css" },
+    { "path": "internal/server/assets_web.go", "source": "files/assets_web.go.tmpl" },
+    { "path": "internal/server/dist/.gitkeep", "source": "files/dist.gitkeep" }
+  ],
+  "patches": [
+    { "path": "Makefile", "marker": "web", "source": "files/Makefile.snippet" },
+    { "path": ".gitignore", "marker": "web", "source": "files/gitignore.snippet" }
+  ]
+}
