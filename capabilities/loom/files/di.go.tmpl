@@ -33,6 +33,7 @@ import (
 {{- if .Caps.Has "api"}}
 	"__module__/internal/api"
 {{- end}}
+	"__module__/internal/config"
 {{- if .Caps.Has "db"}}
 	"github.com/jackc/pgx/v5/pgxpool"
 	"__module__/internal/data"
@@ -47,7 +48,7 @@ import (
 var appGraph = loom.Graph[*App](
 	loom.Name("InitApp"),
 	loom.WithContext(),
-	loom.Provide(OsEnv),
+	loom.Provide(NewConfigLoader),
 	loom.Provide(NewConfig),
 	loom.Provide(NewLogger),
 {{- if .Caps.Has "db"}}
@@ -66,7 +67,7 @@ var appGraph = loom.Graph[*App](
 // repository and API service are constructed even when no route consumes them
 // yet.
 type App struct {
-	Config *Config
+	Config *config.Config
 	Server *Server
 {{- if .Caps.Has "api"}}
 	API api.Service
@@ -77,24 +78,67 @@ type App struct {
 }
 
 // NewApp is the graph root.
-func NewApp(cfg *Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}{{if .Caps.Has "db"}}, repository data.Repository{{end}}) *App {
+func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}{{if .Caps.Has "db"}}, repository data.Repository{{end}}) *App {
 	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}{{if .Caps.Has "db"}}, Repository: repository{{end}}}
 }
 
 type addrKey struct{}
 
-// WithAddr carries the serve listen address into the graph.
+// WithAddr carries the serve listen address into the graph. It is only set when
+// the command-line flag was provided, so it outranks the environment and the
+// configuration file.
 func WithAddr(ctx context.Context, addr string) context.Context {
 	return context.WithValue(ctx, addrKey{}, addr)
 }
 
-// EnvLookup reads an environment variable. It is a dependency rather than a
-// direct os.LookupEnv call so the graph can be built with a fake in tests and
-// the process supplies the real environment.
-type EnvLookup func(key string) (value string, ok bool)
+type configPathKey struct{}
 
-// OsEnv is the process environment reader the graph binds in production.
-func OsEnv() EnvLookup { return os.LookupEnv }
+// WithConfigPath carries the --config path into the graph. An empty path means
+// config.DefaultPath in the working directory.
+func WithConfigPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, configPathKey{}, path)
+}
+
+// NewConfigLoader builds the configuration loader the graph binds. Production
+// uses the filesystem and the process environment; a test builds a loader with
+// fakes and provides it directly. The plain serve command uses the same loader,
+// so configuration has one path in both compositions.
+func NewConfigLoader() *config.Loader {
+	return config.NewOsLoader()
+}
+
+// NewConfig loads the configuration through the injected loader, then applies
+// the --addr override carried in the context.
+//
+// Precedence is flag, environment, file, defaults: the loader already applied
+// the environment, the file and the defaults, and the context value is the
+// command-line flag, so it wins. The database section is validated only when the
+// db capability is installed; an http-only graph never needs it.
+func NewConfig(ctx context.Context, loader *config.Loader) (*config.Config, error) {
+	path := ""
+	if value, ok := ctx.Value(configPathKey{}).(string); ok {
+		path = value
+	}
+	cfg, err := loader.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if value, ok := ctx.Value(addrKey{}).(string); ok {
+		if strings.TrimSpace(value) == "" {
+			return nil, errors.New("di: listen address must not be blank")
+		}
+		cfg.HTTP.Addr = value
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+{{- if .Caps.Has "db"}}
+	if err := cfg.ValidateDatabase(); err != nil {
+		return nil, err
+	}
+{{- end}}
+	return cfg, nil
+}
 
 // NewLogger constructs the application logger the graph binds.
 //
@@ -104,71 +148,6 @@ func OsEnv() EnvLookup { return os.LookupEnv }
 func NewLogger() *slog.Logger {
 	return logging.New(os.Stderr, logging.TextFormat, nil)
 }
-{{- if .Caps.Has "db"}}
-
-// DatabaseURLEnv names the environment variable that supplies the PostgreSQL
-// dsn. It has no default: a database-backed app must set it explicitly rather
-// than silently fall back to a local database.
-const DatabaseURLEnv = "DATABASE_URL"
-{{- end}}
-
-// Config is the immutable configuration the graph binds.
-//
-// It exposes only what the installed capabilities need: the listen address for
-// http, and the database URL for db.
-type Config struct {
-	Addr string
-{{- if .Caps.Has "db"}}
-	DatabaseURL string
-{{- end}}
-}
-
-// NewConfig loads the configuration from the context and the injected
-// environment lookup, applying defaults and validation.
-//
-// The database URL only seeds the pool: the pool parses the dsn but connects on
-// first use, so building and testing never contact PostgreSQL. Because a
-// database-backed serve must not silently fall back to a local database,
-// DATABASE_URL is required when db is installed: NewConfig fails instead of
-// inventing one. Unit tests inject a fake EnvLookup, so only a real serve needs
-// the variable set. A dsn is never included in an error.
-func NewConfig(ctx context.Context, lookup EnvLookup) (*Config, error) {
-	if lookup == nil {
-		return nil, errors.New("di: nil environment lookup")
-	}
-	addr := ":8080"
-	if value, ok := ctx.Value(addrKey{}).(string); ok {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return nil, errors.New("di: listen address must not be blank")
-		}
-		addr = value
-	}
-	cfg := &Config{Addr: addr}
-{{- if .Caps.Has "db"}}
-	if value, ok := lookup(DatabaseURLEnv); ok {
-		cfg.DatabaseURL = strings.TrimSpace(value)
-	}
-{{- end}}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-// Validate reports whether the configuration is usable. It is the single
-// validation point for values loaded from the environment.
-func (c *Config) Validate() error {
-	if strings.TrimSpace(c.Addr) == "" {
-		return errors.New("di: listen address must not be blank")
-	}
-{{- if .Caps.Has "db"}}
-	if strings.TrimSpace(c.DatabaseURL) == "" {
-		return errors.New("di: " + DatabaseURLEnv + " is required when the db capability is installed")
-	}
-{{- end}}
-	return nil
-}
 
 {{if .Caps.Has "db"}}
 // NewPool constructs the PostgreSQL pool and returns a cleanup that closes it.
@@ -176,9 +155,10 @@ func (c *Config) Validate() error {
 // pgxpool parses the dsn but connects only on first use, so the graph does not
 // open a connection. The cleanup is registered with the lifecycle as soon as
 // construction succeeds, so the pool is closed exactly once whether a later
-// constructor fails or the lifecycle stops normally.
-func NewPool(ctx context.Context, cfg *Config) (*pgxpool.Pool, loom.Cleanup, error) {
-	pool, err := data.NewPool(ctx, cfg.DatabaseURL)
+// constructor fails or the lifecycle stops normally. The dsn is built from the
+// validated configuration and is never logged.
+func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, loom.Cleanup, error) {
+	pool, err := data.NewPool(ctx, cfg.DSN())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -328,17 +308,17 @@ func (s *Server) Stop() error {
 // then serves in the background. A serve failure is delivered on Fail so the
 // serve command can stop and report it; a graceful shutdown delivers nil. The
 // injected logger records the startup, failure and shutdown transitions.
-func NewServer(lc *loom.Lifecycle, cfg *Config, logger *slog.Logger{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
+func NewServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
 	server := &Server{
-		HTTP:   httpserver.NewServer(cfg.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
+		HTTP:   httpserver.NewServer(cfg.HTTP.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
 		logger: logger,
 		fail:   make(chan error, 1),
 	}
 	lc.Append(loom.Hook{
 		OnStart: func(context.Context) error {
-			listener, err := net.Listen("tcp", cfg.Addr)
+			listener, err := net.Listen("tcp", cfg.HTTP.Addr)
 			if err != nil {
-				return fmt.Errorf("di: listen on %s: %w", cfg.Addr, err)
+				return fmt.Errorf("di: listen on %s: %w", cfg.HTTP.Addr, err)
 			}
 			server.listener = listener
 			logger.Info("__name__ listening", "addr", listener.Addr().String())

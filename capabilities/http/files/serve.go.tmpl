@@ -1,9 +1,12 @@
 package app
 
 import (
+	"errors"
 	"flag"
 	"os"
+	"strings"
 
+	"__module__/internal/config"
 	httpserver "__module__/internal/httpserver"
 	"__module__/internal/logging"
 )
@@ -21,16 +24,36 @@ func init() {
 // runServe starts the HTTP server that serves every route the installed
 // capabilities contributed to internal/httpserver.
 //
-// It builds the logger with the same base constructor the rest of the process
-// uses, then injects it into the server so the listening record goes through
-// the one logging protocol.
+// The listen address comes from the shared config loader (config.yml, then the
+// environment), and an explicit --addr flag wins over both. It builds the logger
+// with the same base constructor the rest of the process uses, then injects it
+// into the server so the listening record goes through the one logging protocol.
 func runServe(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	addr := flags.String("addr", ":8080", "address to listen on")
+	configPath := flags.String("config", "", "path to config.yml (default ./config.yml)")
+	addr := flags.String("addr", "", "address to listen on (overrides config and environment)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	cfg, err := config.NewOsLoader().Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	listenAddr := cfg.HTTP.Addr
+	// A command-line flag outranks the environment and the file, so it is
+	// applied last and only when it was actually set.
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			listenAddr = *addr
+		}
+	})
+	if strings.TrimSpace(listenAddr) == "" {
+		return errors.New("serve: listen address must not be blank")
+	}
 	logger := logging.New(os.Stderr, logging.TextFormat, nil)
-	return httpserver.Serve(logger, *addr, httpserver.Handler())
+	return httpserver.Serve(logger, listenAddr, httpserver.Handler())
 }

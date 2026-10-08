@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "add",
   "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository.",
-  "requires": ["base"],
+  "requires": ["base", "config"],
   "files": [
     { "path": "sqlc.yaml", "source": "files/sqlc.yaml" },
     { "path": "db/migrations/000001_create_items.sql", "source": "files/migrations/000001_create_items.sql" },
@@ -20,6 +20,8 @@
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
-    { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" }
+    { "path": "Makefile", "marker": "db", "source": "files/Makefile.snippet" },
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
   ]
 }

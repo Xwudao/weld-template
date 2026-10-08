@@ -22,10 +22,15 @@ capabilities/
                    internal/app (dispatch + command registry),
                    internal/logging (log/slog factory, injectable writer),
                    Makefile, README, .gitignore
+  config/          kind: add    -> typed YAML configuration, requires base
+    capability.json
+    files/         internal/config (typed structs, injectable loader, Secret),
+                   config.yml (local, git-ignored), config.example.yml, snippets
   http/            kind: add    -> HTTP lifecycle + composable handler builder
     capability.json
     files/         internal/httpserver (server, injectable handler builder),
-                   internal/app/serve.go (the one serve command)
+                   internal/app/serve.go (the one serve command),
+                   config.yml / config.example.yml http section (snippet)
   web/             kind: add    -> frontend, requires http
     capability.json
     files/         web/ (React + TS + Vite), internal/web (SPA handler),
@@ -47,20 +52,39 @@ capabilities/
                    the Loom generator), README
 ```
 
-`base` is pure CLI: it never imports `net/http`. It ships `internal/logging`, a
-small factory over `log/slog` (`New(w io.Writer, format Format, options
-*slog.HandlerOptions)`), so the process has one logging protocol with an
-injectable sink and no custom logger interface. `http` owns the single `serve`
-command and the composable mux; its `Serve` takes the injected `*slog.Logger`.
-`web` and `api` each require `http` and
+`base` is pure CLI: it never imports `net/http` and ships no configuration. It
+ships `internal/logging`, a small factory over `log/slog` (`New(w io.Writer,
+format Format, options *slog.HandlerOptions)`), so the process has one logging
+protocol with an injectable sink and no custom logger interface.
+
+`config` is the shared configuration capability, installed automatically by the
+first of `http` and `db`. It ships `internal/config`: typed Go structs, a loader
+with injectable `readFile`/`lookupEnv` dependencies, and a redacting `Secret`
+type. Configuration is `config.yml`, read from the working directory by default
+(`--config` overrides the path), overridden by the environment and then by a
+command-line flag, so the precedence is flag, environment, file, defaults. A
+missing or invalid file is an error rather than a silent fallback to defaults.
+`config.yml` is generated locally and git-ignored; `config.example.yml` is
+committed. The file carries a marker region that each capability appends to, so
+adding `db` later merges its `database` section without clobbering the user's
+edits — including a local database password. Because `config.yml` is git-ignored,
+a fresh clone has no local file; adding `http` or `db` restores it from the
+tracked `config.example.yml` (its declared `bootstrap`) before appending, and a
+missing or corrupt example is an actionable error rather than a silent default.
+See [Configuration](#configuration) below.
+
+`http` owns the single `serve` command and the composable mux; its `Serve` takes
+the injected `*slog.Logger` and its `serve` command loads the listen address
+through the shared `config` loader. `web` and `api` each require `http` and
 contribute only their own handler through explicit composition points. They are
 independent: either can be added first, and both are served by the same `serve`
 command.
 
-`db` requires only `base`. It can be added to a CLI-only project, and it is
-independent of `http`, `web` and `api`: the repository speaks domain types, not
-sqlc rows, and the JSON DTOs stay in `internal/api`. It can therefore be added
-in any order relative to the HTTP capabilities.
+`db` requires `base` and `config`. It can be added to a CLI-only project, and it
+is independent of `http`, `web` and `api`: the repository speaks domain types,
+not sqlc rows, and the JSON DTOs stay in `internal/api`. It can therefore be
+added in any order relative to the HTTP capabilities, and adding it appends its
+`database` section to the local `config.yml`.
 
 `loom` requires `http` and is **opt-in**: `web`, `api` and `db` never install
 it. It renders `internal/di/di.go` against the installed capability set and
@@ -70,6 +94,56 @@ capability whose payload is capability aware; every other capability stays
 Loom-free. The graph also provides the `*slog.Logger` (via `NewLogger`) that the
 managed HTTP server uses to record startup, a serve failure and a graceful
 shutdown, so the logger is injected rather than reached for through a global.
+
+## Configuration
+
+`config` is a first-class, shared capability: `http` and `db` both require it, so
+the first of them installs it and the user never adds it by hand. `base` stays a
+minimal CLI with no configuration and no `config.yml`.
+
+`internal/config` holds typed Go structs (`Config`, `HTTP`, `Database`) with
+`yaml` tags for names only — there are no validation tags. `Loader.Load` reads
+`config.yml` from the working directory by default (`--config` overrides the
+path), then applies environment overrides and finally the explicit code
+defaults, so precedence is flag, environment, file, defaults. The loader takes
+its `readFile` and `lookupEnv` as dependencies (`NewLoader`), which is what makes
+the loader testable without the filesystem or the process environment; the plain
+`serve` command and the Loom graph both build the process loader with
+`NewOsLoader`, so there is one configuration path rather than one per
+composition.
+
+A missing file and an invalid file are distinct errors, and neither is a silent
+fallback to defaults: an absent `config.yml`, a malformed one, or an explicitly
+set-but-blank `HTTP_ADDR` fails loudly. A parse error never quotes the file
+content, so a malformed secret cannot reach a log record.
+
+`Secret` is a string that redacts itself in `fmt`, `log/slog`, JSON and YAML
+output; `Value()` is the one accessor that reveals it, and `Config.DSN()` is the
+only place the database password is read. The database section is validated only
+where the database is actually used (`ValidateDatabase`), so an http-only project
+never needs a database setting, and no credential is ever defaulted: host and
+port have defaults, but the user, password and name do not.
+
+`config.yml` is generated locally and listed in `.gitignore`;
+`config.example.yml` is committed and documents the shape. The file carries a
+`weld:config` marker region, and each capability appends only the section it
+needs (`http` appends `http`, `db` appends `database`), so a db-only project
+does not carry a gratuitous http section. Because the append is marker-based and
+sentinel-guarded, adding a capability later preserves every byte outside the
+region and every value inside it — including a database password edited by the
+user — and a repeat add is a no-op.
+
+A patch that targets `config.yml` declares `config.example.yml` as its
+`bootstrap`. On a fresh clone the git-ignored local file is absent while the
+manifest still records it and the committed example remains, so adding `http` or
+`db` restores `config.yml` from the example before appending its section, rather
+than failing on the missing target. The restore only runs when the local file is
+absent, so it never overwrites a local value or comment, and the written file is
+recorded in the manifest with its hash. If the example is absent or no longer
+carries the marker region, the add fails with the exact restore instruction
+(for example `git checkout config.example.yml`) instead of falling back to
+defaults; the generated runtime still errors on a missing `config.yml` until the
+file exists.
 
 ## Database: SQL source of truth and generated code
 
@@ -219,12 +293,15 @@ committed into any scaffolded file.
 ## Tests
 
 The test validates that every embedded descriptor parses, that each declared
-payload exists, that `base` stays CLI-only, that `http` owns the serve command,
-that `web` requires `http` and patches the routes extension point, that `api`
-requires `http` (not `web`) and patches both the routes and the `go.mod`
-dependency extension points, and that `db` requires only `base`, ships genuine
-sqlc output plus a pinned sqlc/goose tool module, and patches the `go.mod`
-dependency and Makefile `db` extension points. It also proves the migration
+payload exists, that `base` stays CLI-only and ships no configuration, that
+`config` needs only `base` and patches the git-ignore and `go.mod` dependency
+regions, that `http` owns the serve command and appends its section to the
+`config` files, that `web` requires `http` and patches the routes extension
+point, that `api` requires `http` (not `web`) and patches both the routes and
+the `go.mod` dependency extension points, and that `db` requires `base` and
+`config`, ships genuine sqlc output plus a pinned sqlc/goose tool module, and
+patches the `go.mod` dependency, Makefile `db` and both `config` extension
+points. It also proves the migration
 targets are guarded (no `psql`, explicit `DATABASE_URL`, one-step confirmed
 down) and the integration test isolates itself in its own schema with no global
 `DROP TABLE`. For the logging milestone it proves `base` ships the `log/slog`

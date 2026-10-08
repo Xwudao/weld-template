@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "add",
   "summary": "HTTP server lifecycle, a composable handler builder and one serve command.",
-  "requires": ["base"],
+  "requires": ["base", "config"],
   "files": [
     { "path": "internal/httpserver/http.go", "source": "files/http.go.tmpl" },
     { "path": "internal/httpserver/server.go", "source": "files/server.go.tmpl" },
@@ -11,5 +11,8 @@
     { "path": "internal/app/serve.go", "source": "files/serve.go.tmpl" },
     { "path": "internal/app/serve_test.go", "source": "files/serve_test.go.tmpl" }
   ],
-  "patches": []
+  "patches": [
+    { "path": "config.yml", "marker": "config", "source": "files/config.snippet", "bootstrap": "config.example.yml" },
+    { "path": "config.example.yml", "marker": "config", "source": "files/config.snippet" }
+  ]
 }

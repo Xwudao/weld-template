@@ -18,21 +18,27 @@ const shutdownTimeout = 10 * time.Second
 // runServeLoom starts the server through the generated Loom graph.
 //
 // The graph owns construction and the lifecycle; this command only resolves the
-// listen address, installs signal handling and drives Start/Stop, so context
-// cancellation reaches the managed HTTP server. It returns when a signal
-// arrives or the server fails, then stops the lifecycle gracefully and reports
-// any shutdown error alongside that failure.
+// configuration path and the listen address, installs signal handling and drives
+// Start/Stop, so context cancellation reaches the managed HTTP server. It returns
+// when a signal arrives or the server fails, then stops the lifecycle gracefully
+// and reports any shutdown error alongside that failure.
 func runServeLoom(args []string) (err error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	addr := flags.String("addr", ":8080", "address to listen on")
+	configPath := flags.String("config", "", "path to config.yml (default ./config.yml)")
+	addr := flags.String("addr", "", "address to listen on (overrides config and environment)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx = di.WithAddr(ctx, *addr)
+	ctx = di.WithConfigPath(ctx, *configPath)
+	// A command-line flag outranks the environment and the file, so the graph is
+	// told about the address only when it was actually set.
+	if flagSet(flags, "addr") {
+		ctx = di.WithAddr(ctx, *addr)
+	}
 
 	app, lifecycle, err := di.InitApp(ctx)
 	if err != nil {
@@ -55,4 +61,15 @@ func runServeLoom(args []string) (err error) {
 	case serveErr := <-app.Server.Fail():
 		return serveErr
 	}
+}
+
+// flagSet reports whether name was provided on the command line.
+func flagSet(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }

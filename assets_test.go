@@ -24,10 +24,11 @@ type descriptor struct {
 		Source string `json:"source"`
 	} `json:"files"`
 	Patches []struct {
-		Path   string `json:"path"`
-		Marker string `json:"marker"`
-		Source string `json:"source"`
-		Mode   string `json:"mode"`
+		Path      string `json:"path"`
+		Marker    string `json:"marker"`
+		Source    string `json:"source"`
+		Mode      string `json:"mode"`
+		Bootstrap string `json:"bootstrap"`
 	} `json:"patches"`
 }
 
@@ -128,8 +129,8 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 	if d.Kind != "add" {
 		t.Fatalf("http kind = %q, want add", d.Kind)
 	}
-	if len(d.Requires) != 1 || d.Requires[0] != "base" {
-		t.Fatalf("http requires = %v, want [base]", d.Requires)
+	if strings.Join(d.Requires, ",") != "base,config" {
+		t.Fatalf("http requires = %v, want [base config]", d.Requires)
 	}
 	paths := map[string]bool{}
 	for _, file := range d.Files {
@@ -144,8 +145,23 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 			t.Errorf("http capability does not ship %s", want)
 		}
 	}
-	if len(d.Patches) != 0 {
-		t.Errorf("http patches = %d, want 0", len(d.Patches))
+	// http appends its section to the config capability's local and example
+	// YAML, so a db-only project never carries a gratuitous http section, and it
+	// declares the tracked example to restore the git-ignored local file from.
+	var configLocal, configExample bool
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "config.yml" && patch.Marker == "config":
+			configLocal = true
+			if patch.Bootstrap != "config.example.yml" {
+				t.Errorf("http config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+			}
+		case patch.Path == "config.example.yml" && patch.Marker == "config":
+			configExample = true
+		}
+	}
+	if !configLocal || !configExample {
+		t.Errorf("http does not append its section to the config files: %+v", d.Patches)
 	}
 }
 
@@ -208,8 +224,8 @@ func TestDBCapabilityIsIndependent(t *testing.T) {
 	if d.Kind != "add" {
 		t.Fatalf("db kind = %q, want add", d.Kind)
 	}
-	if len(d.Requires) != 1 || d.Requires[0] != "base" {
-		t.Fatalf("db requires = %v, want [base]", d.Requires)
+	if strings.Join(d.Requires, ",") != "base,config" {
+		t.Fatalf("db requires = %v, want [base config]", d.Requires)
 	}
 	for _, forbidden := range []string{"http", "web", "api", "loom"} {
 		for _, required := range d.Requires {
@@ -240,13 +256,20 @@ func TestDBCapabilityIsIndependent(t *testing.T) {
 			t.Errorf("db capability does not ship %s", want)
 		}
 	}
-	var deps, makefile bool
+	var deps, makefile, configLocal, configExample bool
 	for _, patch := range d.Patches {
 		switch {
 		case patch.Path == "go.mod" && patch.Marker == "deps":
 			deps = true
 		case patch.Path == "Makefile" && patch.Marker == "db":
 			makefile = true
+		case patch.Path == "config.yml" && patch.Marker == "config":
+			configLocal = true
+			if patch.Bootstrap != "config.example.yml" {
+				t.Errorf("db config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+			}
+		case patch.Path == "config.example.yml" && patch.Marker == "config":
+			configExample = true
 		}
 	}
 	if !deps {
@@ -254,6 +277,94 @@ func TestDBCapabilityIsIndependent(t *testing.T) {
 	}
 	if !makefile {
 		t.Error("db does not patch the Makefile db extension point")
+	}
+	if !configLocal || !configExample {
+		t.Error("db does not merge its section into the local config and the committed example")
+	}
+}
+
+// TestConfigCapabilityContract guards the config capability: it needs only base,
+// ships the shared loader plus the local and example YAML, and patches the
+// git-ignore and go.mod dependency regions.
+func TestConfigCapabilityContract(t *testing.T) {
+	d := readDescriptor(t, "config")
+	if d.Kind != "add" {
+		t.Fatalf("config kind = %q, want add", d.Kind)
+	}
+	if len(d.Requires) != 1 || d.Requires[0] != "base" {
+		t.Fatalf("config requires = %v, want [base]", d.Requires)
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{"internal/config/config.go", "internal/config/config_test.go", "config.example.yml", "config.yml"} {
+		if !paths[want] {
+			t.Errorf("config capability does not ship %s", want)
+		}
+	}
+	var gitignore, deps bool
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == ".gitignore" && patch.Marker == "config":
+			gitignore = true
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			deps = true
+		}
+	}
+	if !gitignore {
+		t.Error("config does not patch the git-ignore region")
+	}
+	if !deps {
+		t.Error("config does not patch the go.mod dependency region")
+	}
+
+	// The loader keeps DB validation separate and redacts secrets, so a local
+	// password never reaches a log and an http-only project needs no DB setting.
+	loader, err := fs.ReadFile(FS(), "capabilities/config/files/config.go.tmpl")
+	if err != nil {
+		t.Fatalf("read config.go: %v", err)
+	}
+	loaderText := string(loader)
+	for _, want := range []string{
+		"type Secret string",
+		"func (Secret) LogValue() slog.Value",
+		"func (Secret) MarshalJSON()",
+		"func (c *Config) ValidateDatabase() error",
+		"func NewLoader(readFile ReadFileFunc, lookupEnv LookupEnvFunc) *Loader",
+		"gopkg.in/yaml.v3",
+	} {
+		if !strings.Contains(loaderText, want) {
+			t.Errorf("config.go is missing %q", want)
+		}
+	}
+	if strings.Contains(loaderText, "os.Getenv") {
+		t.Error("config.go reads os.Getenv directly; the loader must take an injectable lookup")
+	}
+
+	// The example documents the database section and the local file is ignored.
+	gitignoreSnippet, err := fs.ReadFile(FS(), "capabilities/config/files/gitignore.snippet")
+	if err != nil {
+		t.Fatalf("read gitignore snippet: %v", err)
+	}
+	if !strings.Contains(string(gitignoreSnippet), "config.yml") {
+		t.Errorf("git-ignore snippet does not ignore config.yml:\n%s", gitignoreSnippet)
+	}
+	depsSnippet, err := fs.ReadFile(FS(), "capabilities/config/files/go.mod.snippet")
+	if err != nil {
+		t.Fatalf("read go.mod snippet: %v", err)
+	}
+	if !strings.Contains(string(depsSnippet), "gopkg.in/yaml.v3") {
+		t.Errorf("config go.mod snippet does not require yaml.v3:\n%s", depsSnippet)
+	}
+
+	// The base scaffold owns the git-ignore extension point config patches.
+	baseGitignore, err := fs.ReadFile(FS(), "capabilities/base/files/gitignore.txt")
+	if err != nil {
+		t.Fatalf("read base gitignore: %v", err)
+	}
+	if !strings.Contains(string(baseGitignore), "# weld:config:begin") {
+		t.Error("base .gitignore is missing the weld:config extension point")
 	}
 }
 
