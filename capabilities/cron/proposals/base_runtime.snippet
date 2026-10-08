@@ -1,0 +1,42 @@
+PROPOSAL — not shipped, not applied by `weld add cron`.
+
+Target: capabilities/base/files/app.go.tmpl (generated internal/app/app.go)
+Owner: the base capability.
+
+Why it is not applied here: app.go is the base scaffold, shared by every
+capability, and cron must not edit it.
+
+The base app dispatches a command and returns: there is no shared runtime that
+long-running commands start, so today the scheduler has to be wired into each
+serve command individually (see http_serve.snippet and loom_graph.snippet). If
+more long-running capabilities appear, a small runtime seam keeps "follow the
+long-running command, not help/version" in one place:
+
+    // Runtime is work that follows a long-running command's lifecycle. Short
+    // commands (help, version, an unknown command) never construct or start one.
+    type Runtime interface {
+        Start(ctx context.Context) error
+        Stop(ctx context.Context) error
+    }
+
+    var runtimes []Runtime
+
+    // RegisterRuntime appends a runtime in registration order.
+    func RegisterRuntime(runtime Runtime) {
+        if runtime == nil {
+            panic("app: runtime must not be nil")
+        }
+        runtimes = append(runtimes, runtime)
+    }
+
+and a helper a long-running command owns:
+
+    func StartRuntimes(ctx context.Context) (stop func(context.Context) error, err error)
+
+A `serve` command would call StartRuntimes in place of constructing the scheduler
+itself; help and version never call it. This is optional and only worth doing if
+several capabilities need the same lifecycle, so it is left to the base owner.
+
+Until then, the recommended path is the Loom lifecycle hooks (loom_graph.snippet)
+for the Loom composition and the explicit Start/Stop in http_serve.snippet for
+the plain one. Both keep the scheduler tied to serve and out of short commands.

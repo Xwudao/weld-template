@@ -1,0 +1,43 @@
+PROPOSAL — not shipped, not applied by `weld add cron`.
+
+Target: capabilities/http/files/serve.go.tmpl (generated internal/app/serve.go)
+Owner: the http capability.
+
+Why it is not applied here: the plain serve command owns its own file, and cron
+must not edit it. The scheduler only starts inside the long-running serve
+command; help, version and every short command never reach this code.
+
+Prerequisite: runServe today calls httpserver.Serve, which blocks until the
+server fails and installs no signal handling, so there is no graceful-shutdown
+point to hang the scheduler's Stop on. Wiring cron into the plain serve command
+therefore also needs the http capability to serve under a context that a signal
+cancels. The shape below assumes that change; without it, only Register/Start can
+be added and Stop would never run on Ctrl-C.
+
+Proposed edit (inside runServe, after the logger is built and before serving):
+
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
+
+    location, err := cfg.Cron.Location()
+    if err != nil {
+        return err
+    }
+    scheduler := cron.New(logger, cron.WithLocation(location))
+    // Register the application's jobs here, on the scheduler, before Start.
+    scheduler.Start(ctx)
+    defer func() {
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        if err := scheduler.Stop(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+            logger.Error("__name__ cron shutdown failed", "error", err)
+        }
+    }()
+
+    return httpserver.Serve(ctx, logger, listenAddr, httpserver.Handler())
+
+Imports to add: "context", "os/signal", "syscall", and
+"__module__/internal/cron" (aliased cron).
+
+The schedule itself comes from config.Cron.Timezone, so the http capability does
+not need a new setting: cron.timezone defaults to UTC (see internal/config/cron.go).
