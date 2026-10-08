@@ -41,6 +41,13 @@ and both are served by the one `serve` command. `weld add db` requires only this
 base project: it adds PostgreSQL persistence without an HTTP server, so it works
 in a CLI-only project and composes with `http`/`web`/`api` in any order.
 
+The generated JSON API is a **development demo**: it keeps items in process
+memory, so data is lost on restart and no database is required. `weld add db`
+installs the PostgreSQL persistence library but does not connect it; when you
+need persistence, wire the repository in yourself through a stable file (the
+`api`, `db` and `loom` READMEs name them), not through the regenerated Loom
+graph.
+
 The frontend reserves `/api/` for the API capability: unknown API paths return a
 not-found rather than the HTML shell. The base project does not install or
 require any capability.

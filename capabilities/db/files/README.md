@@ -4,6 +4,51 @@ The PostgreSQL persistence layer. It imports `pgx/v5` only — no HTTP server an
 no JSON DTO shape leaks in — so it can be used by a plain CLI project and does
 not depend on `internal/api`.
 
+## The database is wired by hand
+
+`weld add db` installs this package; it does not connect it. Nothing in the
+generated application constructs a pool or a repository, and serving the HTTP or
+JSON API capability never requires database credentials. The default JSON API is
+an in-memory development demo (`api.NewService()`) whose data is lost on
+restart.
+
+To use the database, construct the pool and repository yourself and inject them
+where your business code needs them:
+
+```go
+if err := cfg.ValidateDatabase(); err != nil {
+	return err
+}
+pool, err := data.NewPool(ctx, cfg.DSN())
+if err != nil {
+	return err
+}
+defer pool.Close()
+repo := data.NewRepository(pool)
+```
+
+`config.Database.ValidateDatabase` and `Config.DSN` exist for exactly this
+explicit path; an unrelated startup never calls them.
+
+If the project uses the Loom capability, the graph already declares
+`*pgxpool.Pool` and `data.Repository` as available bindings. Rather than
+construct the pool yourself, edit `internal/di/api_provider.go`, the stable
+provider seam, to have your service consume `data.Repository`:
+
+```go
+// internal/di/api_provider.go
+func NewAPIService(repo data.Repository) api.Service {
+	return myService{repo: repo} // your repository-backed api.Service
+}
+```
+
+Loom then constructs the pool, the repository and your service together,
+validating the database settings at that point, and weld never rewrites the file,
+so the edit survives later capability installs. Do not add providers to
+`internal/di/di.go`: it is regenerated. Without Loom, inject the repository in
+`internal/httpserver/api_route.go`, which is written once and left alone. See
+`internal/di/README.md` and `internal/api/README.md`.
+
 ## SQL is the source of truth
 
 ```

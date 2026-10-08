@@ -1,16 +1,25 @@
 // Package di wires the {{.Name}} application with Loom.
 //
 // InitApp is generated from the graph below: Loom constructs the configuration,
-// {{- if .Caps.Has "db"}} the PostgreSQL pool and repository,{{end}}
 {{- if .Caps.Has "api"}} the JSON API service,{{end}}
 // and the HTTP server, registers the server start and stop hooks with the
 // lifecycle, and returns the application and its lifecycle. The graph is the
 // only place that knows the whole composition; the capabilities themselves stay
 // independent.
 //
-// The graph is capability aware: installing db and api regenerates this file
-// and internal/di/loom_gen.go, so the composed application follows the
-// installed capabilities without a runtime registry or service locator.
+// The graph is capability aware: installing api or web regenerates this file
+// and internal/di/loom_gen.go, so the composed application follows the installed
+// capabilities without a runtime registry or service locator. Do not edit this
+// file: it is regenerated. The API service provider lives in
+// internal/di/api_provider.go, a stable file weld writes once and never
+// regenerates, so wiring persistence there survives every later `weld add`.
+//
+// Installing db adds the pool and repository as available bindings, but nothing
+// in the default graph depends on data.Repository, so Loom prunes them: an
+// ordinary serve never constructs a pool and never needs a database credential.
+// The db capability is a library the user wires into their own providers
+// explicitly (see internal/data/README.md); Loom constructs the pool only when a
+// consumer asks for data.Repository.
 package di
 
 import (
@@ -23,11 +32,6 @@ import (
 	"os"
 	"strings"
 	"time"
-{{- if and (.Caps.Has "api") (.Caps.Has "db")}}
-
-	"crypto/rand"
-	"encoding/hex"
-{{- end}}
 
 	"github.com/Xwudao/loom"
 {{- if .Caps.Has "api"}}
@@ -52,10 +56,15 @@ var appGraph = loom.Graph[*App](
 	loom.Provide(NewConfig),
 	loom.Provide(NewLogger),
 {{- if .Caps.Has "db"}}
+	// The pool and repository are declared bindings, not part of the default
+	// composition: nothing in this graph depends on data.Repository, so Loom
+	// prunes them and an unrelated serve never opens a pool.
 	loom.Provide(NewPool),
 	loom.As[data.Repository](NewRepository),
 {{- end}}
 {{- if .Caps.Has "api"}}
+	// The provider is defined in api_provider.go, the stable wiring seam; edit
+	// that file to persist the API, never this regenerated graph.
 	loom.Provide(NewAPIService),
 {{- end}}
 	loom.Provide(NewServer),
@@ -63,23 +72,23 @@ var appGraph = loom.Graph[*App](
 )
 
 // App is the composed application the serve command runs. It is the composition
-// root: it holds every capability service the graph bound, so the bound
-// repository and API service are constructed even when no route consumes them
-// yet.
+// root: it holds the configuration, the HTTP server and, when the api capability
+// is installed, the API service the server serves.
+//
+// It deliberately holds no database service. With db installed the pool and
+// repository exist as available bindings, but the default graph never depends on
+// them, so serving the API never requires a database.
 type App struct {
 	Config *config.Config
 	Server *Server
 {{- if .Caps.Has "api"}}
 	API api.Service
 {{- end}}
-{{- if .Caps.Has "db"}}
-	Repository data.Repository
-{{- end}}
 }
 
 // NewApp is the graph root.
-func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}{{if .Caps.Has "db"}}, repository data.Repository{{end}}) *App {
-	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}{{if .Caps.Has "db"}}, Repository: repository{{end}}}
+func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}) *App {
+	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}}
 }
 
 type addrKey struct{}
@@ -112,8 +121,9 @@ func NewConfigLoader() *config.Loader {
 //
 // Precedence is flag, environment, file, defaults: the loader already applied
 // the environment, the file and the defaults, and the context value is the
-// command-line flag, so it wins. The database section is validated only when the
-// db capability is installed; an http-only graph never needs it.
+// command-line flag, so it wins. Only the HTTP settings are validated here; the
+// database settings are validated by NewPool, which is the one constructor that
+// needs them, so installing db does not require a credential to serve.
 func NewConfig(ctx context.Context, loader *config.Loader) (*config.Config, error) {
 	path := ""
 	if value, ok := ctx.Value(configPathKey{}).(string); ok {
@@ -132,11 +142,6 @@ func NewConfig(ctx context.Context, loader *config.Loader) (*config.Config, erro
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-{{- if .Caps.Has "db"}}
-	if err := cfg.ValidateDatabase(); err != nil {
-		return nil, err
-	}
-{{- end}}
 	return cfg, nil
 }
 
@@ -152,12 +157,22 @@ func NewLogger() *slog.Logger {
 {{if .Caps.Has "db"}}
 // NewPool constructs the PostgreSQL pool and returns a cleanup that closes it.
 //
+// It is an available graph binding, not part of the default composition: Loom
+// constructs it only when a provider depends on data.Repository, so an
+// API-only serve never reaches it. The database settings are validated here
+// rather than in NewConfig, so a project that installs db but does not use it
+// needs no credential, and a project that does use it fails loudly instead of
+// silently reaching a local database.
+//
 // pgxpool parses the dsn but connects only on first use, so the graph does not
 // open a connection. The cleanup is registered with the lifecycle as soon as
 // construction succeeds, so the pool is closed exactly once whether a later
 // constructor fails or the lifecycle stops normally. The dsn is built from the
 // validated configuration and is never logged.
 func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, loom.Cleanup, error) {
+	if err := cfg.ValidateDatabase(); err != nil {
+		return nil, nil, err
+	}
 	pool, err := data.NewPool(ctx, cfg.DSN())
 	if err != nil {
 		return nil, nil, err
@@ -172,86 +187,6 @@ func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, loom.Clean
 func NewRepository(pool *pgxpool.Pool) *data.PostgresRepository {
 	return data.NewRepository(pool)
 }
-{{end}}
-{{- if .Caps.Has "api"}}
-{{- if .Caps.Has "db"}}
-// NewAPIService binds the JSON API service to the PostgreSQL repository, so the
-// HTTP surface persists through the same graph that owns the pool.
-func NewAPIService(repo data.Repository) api.Service {
-	return &repositoryService{repo: repo}
-}
-
-// repositoryService adapts the persistence Repository to the API Service
-// contract. It is the only place that maps between the storage model and the
-// wire DTOs, so neither package depends on the other.
-type repositoryService struct {
-	repo data.Repository
-}
-
-func (s *repositoryService) Create(ctx context.Context, req api.CreateItemRequest) (api.ItemResponse, error) {
-	id, err := newItemID()
-	if err != nil {
-		return api.ItemResponse{}, err
-	}
-	item, err := s.repo.CreateItem(ctx, data.Item{
-		ID:       id,
-		Name:     req.Name,
-		Quantity: req.Quantity,
-		Status:   string(req.Status),
-	})
-	if err != nil {
-		return api.ItemResponse{}, err
-	}
-	return apiItem(item), nil
-}
-
-func (s *repositoryService) List(ctx context.Context, limit int) ([]api.ItemResponse, error) {
-	items, err := s.repo.ListItems(ctx, limit)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]api.ItemResponse, len(items))
-	for i, item := range items {
-		out[i] = apiItem(item)
-	}
-	return out, nil
-}
-
-func (s *repositoryService) Get(ctx context.Context, id string) (api.ItemResponse, error) {
-	item, err := s.repo.GetItem(ctx, id)
-	if err != nil {
-		if errors.Is(err, data.ErrNotFound) {
-			return api.ItemResponse{}, api.ErrNotFound
-		}
-		return api.ItemResponse{}, err
-	}
-	return apiItem(item), nil
-}
-
-func apiItem(item data.Item) api.ItemResponse {
-	return api.ItemResponse{
-		ID:       item.ID,
-		Name:     item.Name,
-		Quantity: item.Quantity,
-		Status:   api.ItemStatus(item.Status),
-	}
-}
-
-func newItemID() (string, error) {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return "item-" + hex.EncodeToString(buf[:]), nil
-}
-{{- else}}
-// NewAPIService binds the default in-memory JSON API service. Installing the db
-// capability regenerates the graph so the service is backed by the repository
-// instead.
-func NewAPIService() api.Service {
-	return api.NewService()
-}
-{{- end}}
 {{end}}
 // newMux composes the application handler from the installed capabilities.
 //
@@ -322,6 +257,9 @@ func NewServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger{{if .
 			}
 			server.listener = listener
 			logger.Info("__name__ listening", "addr", listener.Addr().String())
+{{- if .Caps.Has "api"}}
+			logger.Info("__name__ API uses in-memory development data; items are lost on restart")
+{{- end}}
 			go func() {
 				err := server.HTTP.Serve(listener)
 				if errors.Is(err, nethttp.ErrServerClosed) {

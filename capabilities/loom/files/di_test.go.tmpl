@@ -3,34 +3,33 @@ package di
 import (
 	"bytes"
 	"context"
+{{- if .Caps.Has "api"}}
+	"encoding/json"
+{{- end}}
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
+{{- if .Caps.Has "api"}}
+	nethttp "net/http"
+	"net/http/httptest"
+{{- end}}
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Xwudao/loom"
+{{- if .Caps.Has "api"}}
+	"__module__/internal/api"
+{{- end}}
 	"__module__/internal/config"
 	"__module__/internal/logging"
-{{- if .Caps.Has "api"}}
-	nethttp "net/http"
-	"net/http/httptest"
-{{- end}}
-{{- if and (.Caps.Has "api") (.Caps.Has "db")}}
-	"encoding/json"
-	"sync"
-
-	"__module__/internal/api"
-	"__module__/internal/data"
-{{- end}}
 )
 
 // The tests here exercise the composed graph without PostgreSQL: the pool is
-// only parsed (never connected), the API service is driven through an injected
-// in-memory repository or the default service, and the lifecycle's bind,
-// serve-failure and graceful-stop behavior is checked on loopback sockets.
+// only parsed (never connected) and only when a consumer asks for it, the API
+// service is served in memory, and the lifecycle's bind, serve-failure and
+// graceful-stop behavior is checked on loopback sockets.
 
 // fakeLoader builds a config.Loader over in-memory files and environment, so
 // configuration tests never touch the filesystem or the process environment.
@@ -49,25 +48,11 @@ func fakeLoader(files, env map[string]string) *config.Loader {
 	return config.NewLoader(readFile, lookupEnv)
 }
 
-// dbEnv satisfies ValidateDatabase when the db capability is installed; no test
-// reaches a real database.
-func dbEnv() map[string]string {
-{{- if .Caps.Has "db"}}
-	return map[string]string{
-		config.EnvDBHost: "localhost",
-		config.EnvDBPort: "5432",
-		config.EnvDBUser: "app",
-		config.EnvDBName: "app",
-	}
-{{- else}}
-	return nil
-{{- end}}
-}
-
 // baseLoader is a loader that satisfies NewConfig for the installed
-// capabilities.
+// capabilities: an empty file and no environment, so the built-in defaults
+// apply. Installing db does not change what NewConfig requires.
 func baseLoader() *config.Loader {
-	return fakeLoader(map[string]string{config.DefaultPath: ""}, dbEnv())
+	return fakeLoader(map[string]string{config.DefaultPath: ""}, nil)
 }
 
 func TestNewConfigDefaultsToLoopbackPort(t *testing.T) {
@@ -82,7 +67,7 @@ func TestNewConfigDefaultsToLoopbackPort(t *testing.T) {
 
 // TestWithAddrOverridesConfig proves the command-line flag outranks the file.
 func TestWithAddrOverridesConfig(t *testing.T) {
-	loader := fakeLoader(map[string]string{config.DefaultPath: "http:\n  addr: \":9999\"\n"}, dbEnv())
+	loader := fakeLoader(map[string]string{config.DefaultPath: "http:\n  addr: \":9999\"\n"}, nil)
 	cfg, err := NewConfig(WithAddr(context.Background(), "127.0.0.1:0"), loader)
 	if err != nil {
 		t.Fatalf("NewConfig: %v", err)
@@ -99,11 +84,14 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 }
 
 // newServerForTest builds a server against the installed graph providers,
-// injecting the default or in-memory service and a logger so the bind/serve
-// lifecycle is exercised without PostgreSQL and without a global logger.
+// injecting a logger so the bind/serve lifecycle is exercised without
+// PostgreSQL and without a global logger.{{if .Caps.Has "api"}}
+// The API service is built through api.NewService rather than the graph's
+// NewAPIService provider, so a user who edits that provider (for example to
+// consume data.Repository) does not break this regenerated test.{{end}}
 func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, NewAPIService({{if .Caps.Has "db"}}newFakeRepository(){{end}}){{end}})
+	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -207,6 +195,11 @@ func TestServerLogsLifecycle(t *testing.T) {
 	if !strings.Contains(out, "shutting down") {
 		t.Fatalf("shutdown was not logged through the injected logger:\n%s", out)
 	}
+{{- if .Caps.Has "api"}}
+	if !strings.Contains(out, "in-memory") {
+		t.Fatalf("the in-memory demo was not logged through the injected logger:\n%s", out)
+	}
+{{- end}}
 }
 
 {{if .Caps.Has "db"}}
@@ -244,12 +237,29 @@ func TestNewConfigEnvironmentOverridesFile(t *testing.T) {
 	}
 }
 
-// TestNewConfigRequiresDatabaseCredentials proves the graph never invents a
-// credential: an empty database section fails loudly rather than silently
-// pointing at a local database.
-func TestNewConfigRequiresDatabaseCredentials(t *testing.T) {
-	if _, err := NewConfig(context.Background(), fakeLoader(map[string]string{config.DefaultPath: ""}, nil)); err == nil {
+// TestNewConfigNeedsNoDatabase proves installing db does not require a database
+// credential to load configuration: NewPool validates the database section, not
+// the graph root, so an unrelated serve starts with no settings.
+func TestNewConfigNeedsNoDatabase(t *testing.T) {
+	cfg, err := NewConfig(context.Background(), fakeLoader(map[string]string{config.DefaultPath: ""}, nil))
+	if err != nil {
+		t.Fatalf("NewConfig without database settings: %v", err)
+	}
+	if cfg.HTTP.Addr != config.DefaultHTTPAddr {
+		t.Fatalf("HTTP.Addr = %q, want %q", cfg.HTTP.Addr, config.DefaultHTTPAddr)
+	}
+}
+
+// TestNewPoolRequiresDatabaseCredentials proves the credential check guards the
+// pool, the one constructor that needs a database: constructing it without a
+// database setting fails loudly rather than inventing a dsn.
+func TestNewPoolRequiresDatabaseCredentials(t *testing.T) {
+	pool, cleanup, err := NewPool(context.Background(), &config.Config{})
+	if err == nil {
 		t.Fatal("expected an error when the database has no credentials")
+	}
+	if pool != nil || cleanup != nil {
+		t.Fatal("NewPool returned a pool or cleanup alongside an error")
 	}
 }
 
@@ -279,82 +289,15 @@ func TestNewPoolParsesWithoutConnecting(t *testing.T) {
 	}
 }
 {{end}}
-{{- if and (.Caps.Has "api") (.Caps.Has "db")}}
-// fakeRepository is an in-memory data.Repository injected directly, so the
-// adapter and the composed route are exercised without PostgreSQL.
-type fakeRepository struct {
-	mu    sync.Mutex
-	items map[string]data.Item
-}
-
-func newFakeRepository() *fakeRepository {
-	return &fakeRepository{items: map[string]data.Item{}}
-}
-
-func (r *fakeRepository) CreateItem(_ context.Context, item data.Item) (data.Item, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.items[item.ID] = item
-	return item, nil
-}
-
-func (r *fakeRepository) GetItem(_ context.Context, id string) (data.Item, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	item, ok := r.items[id]
-	if !ok {
-		return data.Item{}, data.ErrNotFound
-	}
-	return item, nil
-}
-
-func (r *fakeRepository) ListItems(_ context.Context, limit int) ([]data.Item, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	items := make([]data.Item, 0, len(r.items))
-	for _, item := range r.items {
-		if len(items) >= limit {
-			break
-		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
-func TestRepositoryServicePersistsThroughInjectedRepository(t *testing.T) {
-	service := NewAPIService(newFakeRepository())
-	created, err := service.Create(context.Background(), api.CreateItemRequest{
-		Name: "widget", Quantity: 3, Status: api.ItemStatusActive,
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if created.ID == "" || created.Name != "widget" {
-		t.Fatalf("created = %+v", created)
-	}
-	got, err := service.Get(context.Background(), created.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got != created {
-		t.Fatalf("Get = %+v, want %+v", got, created)
-	}
-	if _, err := service.Get(context.Background(), "missing"); err == nil {
-		t.Fatal("missing item did not map to an error")
-	}
-}
-{{- end}}
 {{- if .Caps.Has "api"}}
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMux(NewAPIService({{if .Caps.Has "db"}}newFakeRepository(){{end}}))
+	mux := newMux(api.NewService())
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
-	mux.ServeHTTP(recorder, request)
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body)))
 	if recorder.Code != nethttp.StatusCreated {
 		t.Fatalf("POST /api/items = %d: %s", recorder.Code, recorder.Body)
 	}
-{{- if .Caps.Has "db"}}
 	var created api.ItemResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -364,6 +307,67 @@ func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("GET /api/items/%s = %d", created.ID, recorder.Code)
 	}
-{{- end}}
+}
+
+// TestComposedServerServesInMemoryAPI proves serving needs no database: the
+// lifecycle binds a real loopback socket, a POST persists into the in-memory
+// service and a GET reads it back. The address is ephemeral (:0), so the test
+// never depends on a fixed port.
+func TestComposedServerServesInMemoryAPI(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = lifecycle.Stop(ctx) }()
+
+	base := "http://" + server.listener.Addr().String()
+	created := postJSON(t, base+"/api/items", `{"name":"widget","quantity":2,"status":"active"}`)
+	var item api.ItemResponse
+	if err := json.Unmarshal(created, &item); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if item.ID == "" || item.Name != "widget" {
+		t.Fatalf("created = %+v", item)
+	}
+	got := getJSON(t, base+"/api/items/"+item.ID)
+	if !strings.Contains(string(got), item.ID) {
+		t.Fatalf("GET did not return the created item: %s", got)
+	}
+}
+
+func postJSON(t *testing.T, url, body string) []byte {
+	t.Helper()
+	resp, err := nethttp.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read POST %s: %v", url, err)
+	}
+	if resp.StatusCode != nethttp.StatusCreated {
+		t.Fatalf("POST %s = %d: %s", url, resp.StatusCode, raw)
+	}
+	return raw
+}
+
+func getJSON(t *testing.T, url string) []byte {
+	t.Helper()
+	resp, err := nethttp.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read GET %s: %v", url, err)
+	}
+	if resp.StatusCode != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", url, resp.StatusCode, raw)
+	}
+	return raw
 }
 {{- end}}

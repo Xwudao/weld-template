@@ -24,16 +24,19 @@ type Service interface {
 	Get(ctx context.Context, id string) (ItemResponse, error)
 }
 
-// memoryService is the default in-memory Service. It exists so the scaffolded
-// API runs with no database; it is not a persistence layer and holds no state
-// beyond the process.
+// memoryService is the default in-memory Service: the development demo. It
+// exists so the scaffolded API runs with no database; it is not a persistence
+// layer, holds no state beyond the process, and loses every item on restart.
+// Installing the db capability does not replace it automatically.
 type memoryService struct {
 	mu    sync.Mutex
 	next  int
 	items map[string]ItemResponse
 }
 
-// NewService returns the default in-memory Service.
+// NewService returns the default in-memory Service, the development demo. Data
+// is lost on restart and no database is required; wire a persistent Service in
+// yourself when you need one.
 func NewService() Service {
 	return &memoryService{items: map[string]ItemResponse{}}
 }

@@ -20,15 +20,19 @@ type descriptor struct {
 		Test   string `json:"test"`
 	} `json:"di"`
 	Files []struct {
-		Path   string `json:"path"`
-		Source string `json:"source"`
+		Path       string   `json:"path"`
+		Source     string   `json:"source"`
+		When       []string `json:"when"`
+		WhenAbsent []string `json:"whenAbsent"`
 	} `json:"files"`
 	Patches []struct {
-		Path      string `json:"path"`
-		Marker    string `json:"marker"`
-		Source    string `json:"source"`
-		Mode      string `json:"mode"`
-		Bootstrap string `json:"bootstrap"`
+		Path       string   `json:"path"`
+		Marker     string   `json:"marker"`
+		Source     string   `json:"source"`
+		Mode       string   `json:"mode"`
+		Bootstrap  string   `json:"bootstrap"`
+		When       []string `json:"when"`
+		WhenAbsent []string `json:"whenAbsent"`
 	} `json:"patches"`
 }
 
@@ -193,10 +197,23 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		"internal/api/handler.go",
 		"internal/api/openapi.go",
 		"internal/httpserver/api_route.go",
+		"internal/di/api_provider.go",
 	} {
 		if !paths[want] {
 			t.Errorf("api capability does not ship %s", want)
 		}
+	}
+	// The API provider file is created only once loom is also installed: when
+	// api is added after loom. It carries the loom guard so it is never written
+	// when loom is absent.
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path == "internal/di/api_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+		}
+	}
+	if !providerSeam {
+		t.Errorf("api api_provider.go is not guarded by when: [loom]: %+v", d.Files)
 	}
 	var deps, routes bool
 	for _, patch := range d.Patches {
@@ -702,13 +719,65 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read di template: %v", err)
 	}
-	for _, want := range []string{`{{if .Caps.Has "db"}}`, `{{if .Caps.Has "api"}}`, "NewPool", "NewAPIService", "repositoryService"} {
+	for _, want := range []string{`{{if .Caps.Has "db"}}`, `{{if .Caps.Has "api"}}`, "NewPool", "loom.Provide(NewAPIService)"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("di template is missing %q", want)
 		}
 	}
+	// The provider is defined in the stable api_provider.go seam, not in the
+	// regenerated graph: a provider in di.go would be erased by the next
+	// capability install, taking the user's persistence wiring with it.
+	if strings.Contains(string(graph), "func NewAPIService") {
+		t.Error("di template defines NewAPIService; the provider must live in the stable api_provider.go")
+	}
+	if strings.Contains(string(graph), "repositoryService") {
+		t.Error("di template still auto-wires the repository into the API service")
+	}
 	if strings.Contains(string(graph), "os.Getenv") {
 		t.Error("di template reads os.Getenv directly; configuration must use the injected EnvLookup")
+	}
+}
+
+// TestLoomProviderSeamIsStableAndOrderIndependent guards the durable api+db
+// wiring seam: the graph references a provider defined in
+// internal/di/api_provider.go, a file weld writes once (when api and loom are
+// both installed, whichever arrives second) and never regenerates. loom
+// declares it guarded by api; the api capability declares the identical
+// template guarded by loom, so exactly one of them writes the file in either
+// install order.
+func TestLoomProviderSeamIsStableAndOrderIndependent(t *testing.T) {
+	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/api_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom api_provider template: %v", err)
+	}
+	apiTemplate, err := fs.ReadFile(FS(), "capabilities/api/files/api_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read api api_provider template: %v", err)
+	}
+	if string(loomTemplate) != string(apiTemplate) {
+		t.Error("the api and loom api_provider.go templates differ; the install order would change the generated file")
+	}
+	for _, want := range []string{
+		"func NewAPIService() api.Service",
+		"return api.NewService()",
+		"__module__/internal/api",
+	} {
+		if !strings.Contains(string(loomTemplate), want) {
+			t.Errorf("api_provider.go template is missing %q:\n%s", want, loomTemplate)
+		}
+	}
+
+	d := readDescriptor(t, "loom")
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path != "internal/di/api_provider.go" {
+			continue
+		}
+		providerSeam = file.Source == "files/api_provider.go.tmpl" &&
+			len(file.When) == 1 && file.When[0] == "api" && len(file.WhenAbsent) == 0
+	}
+	if !providerSeam {
+		t.Errorf("loom api_provider.go is not declared with source files/api_provider.go.tmpl guarded by when: [api]: %+v", d.Files)
 	}
 }
 

@@ -2,7 +2,7 @@
   "name": "loom",
   "version": "0.1.0",
   "kind": "add",
-  "summary": "Compile-time dependency injection: a Loom graph that wires the HTTP server, the JSON API service and the PostgreSQL repository with lifecycle start/stop.",
+  "summary": "Compile-time dependency injection: a Loom graph that wires the HTTP server and the in-memory JSON API service with lifecycle start/stop; the database is a library you wire in yourself.",
   "requires": ["http"],
   "di": {
     "dir": "internal/di",
@@ -13,7 +13,8 @@
     { "path": "internal/app/serve_loom.go", "source": "files/serve_loom.go.tmpl" },
     { "path": "tools/loom/go.mod", "source": "files/tools/go.mod.tmpl" },
     { "path": "tools/loom/go.sum", "source": "files/tools/go.sum" },
-    { "path": "internal/di/README.md", "source": "files/README.md" }
+    { "path": "internal/di/README.md", "source": "files/README.md" },
+    { "path": "internal/di/api_provider.go", "source": "files/api_provider.go.tmpl", "when": ["api"] }
   ],
   "patches": [
     { "path": "internal/app/serve.go", "marker": "serve", "mode": "replace", "source": "files/serve.snippet" },
