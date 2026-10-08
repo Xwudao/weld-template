@@ -18,7 +18,8 @@ constructs are the ones the process uses.
 | `*slog.Logger` | always | `NewLogger`, which builds the base `log/slog` handler on stderr; injected into the server so startup, a serve failure and a shutdown are logged through one protocol, with no process default logger and no custom logger interface |
 | `*pgxpool.Pool` | `db` | `data.NewPool`; **declared but not part of the default composition**. Loom prunes it while nothing depends on `data.Repository`, so a plain serve never opens a pool. When a consumer asks for the repository it validates the database section, parses the dsn lazily (it is **not** connected at build, test or startup) and registers a cleanup that closes it exactly once |
 | `data.Repository` | `db` | `data.NewRepository(pool)`; the binding exists so a user's own provider can consume it, not so the default graph constructs it |
-| `api.Service` | `api` | defined by `api_provider.go` (the stable wiring seam), defaulting to `api.NewService()`, the in-memory development demo. Installing `db` does **not** switch it to PostgreSQL |
+| `*redis.Client` | `redis` | `redisclient.New` through `NewRedisClient`, defined in the stable `redis_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*redis.Client`, so a plain serve builds no client and needs no Redis setting. When a consumer asks for it, Loom validates the `redis` section, builds the lazy client (it is **not connected** at build, test or startup) and registers a cleanup that closes it exactly once |
+| `api.Service` | `api` | defined by `api_provider.go` (the stable wiring seam), defaulting to `api.NewService()`, the in-memory development demo. Installing `db` or `redis` does **not** switch it to PostgreSQL or Redis |
 | `*httpserver.Server` | always | the composed mux plus its `loom.Hook` start/stop lifecycle |
 | `*App` | always | the graph root returned by `InitApp` |
 
@@ -52,6 +53,28 @@ signature: once `NewAPIService` takes `data.Repository`, Loom constructs
 through `config.Database.ValidateDatabase`, so the credential is required only
 when the pool is actually built, never for an unrelated serve. See
 `internal/data/README.md` for the pool, repository and transaction seams.
+
+### Redis is wired by hand too
+
+`weld add redis` installs an available `*redis.Client` binding in the same way:
+the provider `NewRedisClient` lives in `internal/di/redis_provider.go`, another
+stable seam weld writes once (when both `redis` and `loom` are installed,
+whichever arrives second) and never regenerates. The default graph declares it
+but does not depend on `*redis.Client`, so Loom prunes it and serving needs no
+Redis setting. To use it, make a provider the graph already consumes depend on
+`*redis.Client` — for an api+loom project, edit `api_provider.go`:
+
+```go
+// internal/di/api_provider.go, after `weld add redis`
+func NewAPIService(client *redis.Client) api.Service {
+	return myService{client: client} // your Redis-backed api.Service
+}
+```
+
+`NewRedisClient` never dials and never pings: `go-redis` connects on the first
+command, so building the graph, running tests and starting the process need no
+Redis server, and the lifecycle closes the client exactly once when it was
+constructed. See `internal/redisclient/README.md`.
 
 Never wire providers into `di.go`: it is regenerated from the installed
 capability set, and an edit there is erased by the next capability install.

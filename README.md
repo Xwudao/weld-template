@@ -45,6 +45,11 @@ capabilities/
     files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
                    module pinning sqlc and goose), internal/data (Repository +
                    pool), generated internal/data/sqlc, snippets
+  redis/           kind: add    -> opt-in Redis client, requires base + config
+    capability.json
+    files/         internal/redisclient (lazy go-redis client, caller owns the
+                   lifecycle), internal/config/redis.go (typed connection
+                   settings), snippets that extend the shared config, README
   loom/            kind: add    -> Loom DI graph, requires http, opt-in
     capability.json
     files/         internal/di/di.go.tmpl (capability-aware graph source),
@@ -86,6 +91,15 @@ not sqlc rows, and the JSON DTOs stay in `internal/api`. It can therefore be
 added in any order relative to the HTTP capabilities, and adding it appends its
 `database` section to the local `config.yml`.
 
+`redis` is likewise independent: it requires only `base` and `config`, so it can
+be added to a CLI-only project and composed with `http`/`db`/`api` in any order.
+It installs an opt-in client, never a connection: `internal/redisclient` builds a
+lazy `go-redis` client from the typed `redis` configuration section (added to
+`config.yml` through the same extension point as `database`), and the caller owns
+its lifecycle. Nothing in the generated application imports the client, so an
+ordinary build, test or serve needs no Redis server; `weld add redis` never wires
+Redis into a service.
+
 `loom` requires `http` and is **opt-in**: `web`, `api` and `db` never install
 it. It renders `internal/di/di.go` against the installed capability set and
 generates `internal/di/loom_gen.go` with the real pinned generator, so the graph
@@ -112,6 +126,16 @@ the loader testable without the filesystem or the process environment; the plain
 `NewOsLoader`, so there is one configuration path rather than one per
 composition.
 
+The typed struct is closed but extensible: `config.go` carries three marker
+regions (`weld:configfields`, `weld:configenv`, `weld:configdefaults`) where a
+later capability appends its own field and registers its environment overrides
+and defaults. A capability that needs a new section adds the field, the redacting
+type and the accessors in a same-package file — `redis` adds `internal/config/redis.go`
+and the `redis` section — so the base loader never changes. A project whose
+`config.go` was generated before these regions existed has no such marker, so
+`weld add redis` fails with the missing extension point instead of rewriting the
+file.
+
 A missing file and an invalid file are distinct errors, and neither is a silent
 fallback to defaults: an absent `config.yml`, a malformed one, or an explicitly
 set-but-blank `HTTP_ADDR` fails loudly. A parse error never quotes the file
@@ -127,17 +151,17 @@ port have defaults, but the user, password and name do not.
 `config.yml` is generated locally and listed in `.gitignore`;
 `config.example.yml` is committed and documents the shape. The file carries a
 `weld:config` marker region, and each capability appends only the section it
-needs (`http` appends `http`, `db` appends `database`), so a db-only project
-does not carry a gratuitous http section. Because the append is marker-based and
-sentinel-guarded, adding a capability later preserves every byte outside the
-region and every value inside it — including a database password edited by the
-user — and a repeat add is a no-op.
+needs (`http` appends `http`, `db` appends `database`, `redis` appends `redis`),
+so a db-only project does not carry a gratuitous http section. Because the
+append is marker-based and sentinel-guarded, adding a capability later preserves
+every byte outside the region and every value inside it — including a database
+or Redis password edited by the user — and a repeat add is a no-op.
 
 A patch that targets `config.yml` declares `config.example.yml` as its
 `bootstrap`. On a fresh clone the git-ignored local file is absent while the
-manifest still records it and the committed example remains, so adding `http` or
-`db` restores `config.yml` from the example before appending its section, rather
-than failing on the missing target. The restore only runs when the local file is
+manifest still records it and the committed example remains, so adding `http`,
+`db` or `redis` restores `config.yml` from the example before appending its
+section, rather than failing on the missing target. The restore only runs when the local file is
 absent, so it never overwrites a local value or comment, and the written file is
 recorded in the manifest with its hash. If the example is absent or no longer
 carries the marker region, the add fails with the exact restore instruction

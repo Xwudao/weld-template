@@ -11,15 +11,18 @@
 // and internal/di/loom_gen.go, so the composed application follows the installed
 // capabilities without a runtime registry or service locator. Do not edit this
 // file: it is regenerated. The API service provider lives in
-// internal/di/api_provider.go, a stable file weld writes once and never
-// regenerates, so wiring persistence there survives every later `weld add`.
+// internal/di/api_provider.go and the Redis client provider in
+// internal/di/redis_provider.go, both stable files weld writes once and never
+// regenerates, so wiring there survives every later `weld add`.
 //
 // Installing db adds the pool and repository as available bindings, but nothing
 // in the default graph depends on data.Repository, so Loom prunes them: an
 // ordinary serve never constructs a pool and never needs a database credential.
 // The db capability is a library the user wires into their own providers
 // explicitly (see internal/data/README.md); Loom constructs the pool only when a
-// consumer asks for data.Repository.
+// consumer asks for data.Repository. Installing redis likewise adds the Redis
+// client as an available binding and prunes it unless a provider asks for
+// *redis.Client (see internal/redisclient/README.md).
 package di
 
 import (
@@ -66,6 +69,14 @@ var appGraph = loom.Graph[*App](
 	// The provider is defined in api_provider.go, the stable wiring seam; edit
 	// that file to persist the API, never this regenerated graph.
 	loom.Provide(NewAPIService),
+{{- end}}
+{{- if .Caps.Has "redis"}}
+	// The Redis client is a declared binding, not part of the default
+	// composition: nothing in this graph depends on *redis.Client, so Loom prunes
+	// it and an unrelated serve never constructs a client and never needs a Redis
+	// setting. It is defined in redis_provider.go, the stable wiring seam; edit a
+	// provider this graph consumes to depend on *redis.Client to switch it on.
+	loom.Provide(NewRedisClient),
 {{- end}}
 	loom.Provide(NewServer),
 	loom.Provide(NewApp),

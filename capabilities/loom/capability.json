@@ -14,7 +14,8 @@
     { "path": "tools/loom/go.mod", "source": "files/tools/go.mod.tmpl" },
     { "path": "tools/loom/go.sum", "source": "files/tools/go.sum" },
     { "path": "internal/di/README.md", "source": "files/README.md" },
-    { "path": "internal/di/api_provider.go", "source": "files/api_provider.go.tmpl", "when": ["api"] }
+    { "path": "internal/di/api_provider.go", "source": "files/api_provider.go.tmpl", "when": ["api"] },
+    { "path": "internal/di/redis_provider.go", "source": "files/redis_provider.go.tmpl", "when": ["redis"] }
   ],
   "patches": [
     { "path": "internal/app/serve.go", "marker": "serve", "mode": "replace", "source": "files/serve.snippet" },

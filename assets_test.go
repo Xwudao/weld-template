@@ -800,3 +800,138 @@ func TestNoCapabilityRequiresLoom(t *testing.T) {
 		}
 	}
 }
+
+// TestRedisCapabilityIsConfigOnly guards the redis capability's contract: it
+// needs only base and config (never http, db, api or loom), ships the typed
+// config extension and the lazy client package, and declares its Loom provider
+// seam guarded on loom.
+func TestRedisCapabilityIsConfigOnly(t *testing.T) {
+	d := readDescriptor(t, "redis")
+	if d.Kind != "add" {
+		t.Fatalf("redis kind = %q, want add", d.Kind)
+	}
+	if strings.Join(d.Requires, ",") != "base,config" {
+		t.Fatalf("redis requires = %v, want [base config]", d.Requires)
+	}
+	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+		for _, required := range d.Requires {
+			if required == forbidden {
+				t.Errorf("redis requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/config/redis.go",
+		"internal/config/redis_test.go",
+		"internal/redisclient/redisclient.go",
+		"internal/redisclient/redisclient_test.go",
+		"internal/redisclient/README.md",
+		"internal/di/redis_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("redis capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path == "internal/di/redis_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+		}
+	}
+	if !providerSeam {
+		t.Errorf("redis redis_provider.go is not guarded by when: [loom]: %+v", d.Files)
+	}
+	var deps, configLocal, configExample bool
+	markers := map[string]bool{}
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			deps = true
+		case patch.Path == "config.yml" && patch.Marker == "config":
+			configLocal = true
+			if patch.Bootstrap != "config.example.yml" {
+				t.Errorf("redis config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+			}
+		case patch.Path == "config.example.yml" && patch.Marker == "config":
+			configExample = true
+		case patch.Path == "internal/config/config.go":
+			markers[patch.Marker] = true
+		}
+	}
+	if !deps {
+		t.Error("redis does not patch the go.mod dependency region")
+	}
+	if !configLocal || !configExample {
+		t.Error("redis does not merge its section into the local config and the committed example")
+	}
+	for _, want := range []string{"configfields", "configenv", "configdefaults"} {
+		if !markers[want] {
+			t.Errorf("redis does not patch the config.go %s extension point: %+v", want, d.Patches)
+		}
+	}
+
+	// The client is lazy and free of the HTTP, JSON and data surfaces, and the
+	// config file keeps the connection settings behind the redacting Secret.
+	client, err := fs.ReadFile(FS(), "capabilities/redis/files/redisclient.go.tmpl")
+	if err != nil {
+		t.Fatalf("read redisclient template: %v", err)
+	}
+	clientText := string(client)
+	if !strings.Contains(clientText, "github.com/redis/go-redis/v9") {
+		t.Error("redisclient does not build a go-redis client")
+	}
+	for _, forbidden := range []string{"net/http", "encoding/json", "internal/data"} {
+		if strings.Contains(clientText, forbidden) {
+			t.Errorf("redisclient payload references %s", forbidden)
+		}
+	}
+	config, err := fs.ReadFile(FS(), "capabilities/redis/files/redis_config.go.tmpl")
+	if err != nil {
+		t.Fatalf("read redis config template: %v", err)
+	}
+	for _, want := range []string{"type Redis struct", "Username Secret", "Password Secret", "func (c *Config) ValidateRedis() error"} {
+		if !strings.Contains(string(config), want) {
+			t.Errorf("redis config is missing %q", want)
+		}
+	}
+
+	// Loom's graph is capability aware for redis too.
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read di template: %v", err)
+	}
+	for _, want := range []string{`{{- if .Caps.Has "redis"}}`, "loom.Provide(NewRedisClient)"} {
+		if !strings.Contains(string(graph), want) {
+			t.Errorf("loom di template is missing %q", want)
+		}
+	}
+	if strings.Contains(string(graph), "func NewRedisClient") {
+		t.Error("di template defines NewRedisClient; the provider must live in the stable redis_provider.go")
+	}
+}
+
+// TestRedisProviderSeamTemplatesMatch proves the redis and loom copies of the
+// provider seam are byte-identical, so the install order cannot change the
+// generated file.
+func TestRedisProviderSeamTemplatesMatch(t *testing.T) {
+	redisTemplate, err := fs.ReadFile(FS(), "capabilities/redis/files/redis_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read redis redis_provider template: %v", err)
+	}
+	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/redis_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom redis_provider template: %v", err)
+	}
+	if string(redisTemplate) != string(loomTemplate) {
+		t.Error("the redis and loom redis_provider.go templates differ; the install order would change the generated file")
+	}
+	for _, want := range []string{"func NewRedisClient(cfg *config.Config) (*redis.Client, loom.Cleanup, error)", "__module__/internal/redisclient"} {
+		if !strings.Contains(string(redisTemplate), want) {
+			t.Errorf("redis_provider.go template is missing %q:\n%s", want, redisTemplate)
+		}
+	}
+}

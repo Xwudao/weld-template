@@ -13,6 +13,13 @@
 // database password may live in the local, git-ignored config.yml for
 // development; the Secret type keeps it out of logs and formatted output, and a
 // production environment overrides it through DB_PASSWORD or DATABASE_URL.
+//
+// The typed sections are closed but extensible: three marker regions
+// (weld:configfields, weld:configenv, weld:configdefaults) let a later
+// capability add its own field, environment overrides and defaults through a
+// marker patch without weld rewriting anything outside the region. A capability
+// that needs a new section adds the field, the redacting type and the accessor
+// in the same package (for example internal/config/redis.go).
 package config
 
 import (
@@ -97,6 +104,11 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 type Config struct {
 	HTTP     HTTP     `yaml:"http"`
 	Database Database `yaml:"database"`
+	// weld:configfields:begin
+	// A capability that extends the typed configuration appends its field here
+	// through a marker patch; weld never rewrites the region's owner. The base
+	// scaffold keeps it empty.
+	// weld:configfields:end
 }
 
 // HTTP holds the HTTP server settings.
@@ -213,6 +225,10 @@ func (l *Loader) applyEnv(cfg *Config) error {
 	if value, ok := l.lookupEnv(EnvDatabaseURL); ok {
 		cfg.Database.DSN = Secret(strings.TrimSpace(value))
 	}
+	// weld:configenv:begin
+	// A capability that extends the typed configuration applies its environment
+	// overrides here through a marker patch.
+	// weld:configenv:end
 	return nil
 }
 
@@ -228,6 +244,10 @@ func (l *Loader) applyDefaults(cfg *Config) {
 	if cfg.Database.Port == 0 {
 		cfg.Database.Port = DefaultDBPort
 	}
+	// weld:configdefaults:begin
+	// A capability that extends the typed configuration applies its defaults
+	// here through a marker patch.
+	// weld:configdefaults:end
 }
 
 // Validate reports whether the HTTP settings are usable.

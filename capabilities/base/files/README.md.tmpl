@@ -31,6 +31,7 @@ first.
 weld add web   # installs the http capability, then the React + TS + Vite frontend
 weld add api   # installs the http capability, then the JSON API + OpenAPI 3.1
 weld add db    # PostgreSQL: SQL migrations, sqlc queries and a repository (no HTTP)
+weld add redis # an opt-in Redis client with typed connection config (no HTTP)
 ```
 
 `weld add web` installs `http`, which owns the `serve` command and the HTTP
@@ -40,13 +41,16 @@ frontend. `web` and `api` are independent, so they can be added in either order
 and both are served by the one `serve` command. `weld add db` requires only this
 base project: it adds PostgreSQL persistence without an HTTP server, so it works
 in a CLI-only project and composes with `http`/`web`/`api` in any order.
+`weld add redis` also requires only this base project: it installs an opt-in
+Redis client that the caller owns, never a connection, so it composes with the
+other capabilities and needs no Redis server to build or serve.
 
 The generated JSON API is a **development demo**: it keeps items in process
 memory, so data is lost on restart and no database is required. `weld add db`
-installs the PostgreSQL persistence library but does not connect it; when you
-need persistence, wire the repository in yourself through a stable file (the
-`api`, `db` and `loom` READMEs name them), not through the regenerated Loom
-graph.
+installs the PostgreSQL persistence library but does not connect it; `weld add
+redis` installs a lazy client but never imports it into the application. When
+you need either, wire it in yourself through a stable file (the `api`, `db`,
+`redis` and `loom` READMEs name them), not through the regenerated Loom graph.
 
 The frontend reserves `/api/` for the API capability: unknown API paths return a
 not-found rather than the HTML shell. The base project does not install or
