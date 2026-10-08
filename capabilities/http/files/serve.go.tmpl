@@ -8,11 +8,13 @@ import (
 )
 
 func init() {
+	// weld:serve:begin
 	RegisterCommand(Command{
 		Name:    "serve",
 		Summary: "start the HTTP server for the installed capabilities",
 		Run:     runServe,
 	})
+	// weld:serve:end
 }
 
 // runServe starts the HTTP server that serves every route the installed

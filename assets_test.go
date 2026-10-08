@@ -14,7 +14,12 @@ type descriptor struct {
 	Kind     string   `json:"kind"`
 	Summary  string   `json:"summary"`
 	Requires []string `json:"requires"`
-	Files    []struct {
+	DI       *struct {
+		Dir    string `json:"dir"`
+		Source string `json:"source"`
+		Test   string `json:"test"`
+	} `json:"di"`
+	Files []struct {
 		Path   string `json:"path"`
 		Source string `json:"source"`
 	} `json:"files"`
@@ -22,6 +27,7 @@ type descriptor struct {
 		Path   string `json:"path"`
 		Marker string `json:"marker"`
 		Source string `json:"source"`
+		Mode   string `json:"mode"`
 	} `json:"patches"`
 }
 
@@ -395,6 +401,125 @@ func TestBaseCapabilityIsCLIOnly(t *testing.T) {
 		}
 		if strings.Contains(content, "/api/health") {
 			t.Errorf("base payload %q mentions the API health endpoint", file.Source)
+		}
+	}
+}
+
+// TestLoomCapabilityRequiresHTTPAndDeclaresGraph guards the loom capability's
+// contract: it is additive, needs only http, declares a capability-aware DI
+// graph, and replaces (never appends to) the serve registration and go directive
+// regions.
+func TestLoomCapabilityRequiresHTTPAndDeclaresGraph(t *testing.T) {
+	d := readDescriptor(t, "loom")
+	if d.Kind != "add" {
+		t.Fatalf("loom kind = %q, want add", d.Kind)
+	}
+	if len(d.Requires) != 1 || d.Requires[0] != "http" {
+		t.Fatalf("loom requires = %v, want [http]", d.Requires)
+	}
+	if d.DI == nil || d.DI.Dir != "internal/di" || d.DI.Source == "" || d.DI.Test == "" {
+		t.Fatalf("loom di = %+v, want a dir, source and test", d.DI)
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/app/serve_loom.go",
+		"tools/loom/go.mod",
+		"tools/loom/go.sum",
+	} {
+		if !paths[want] {
+			t.Errorf("loom capability does not ship %s", want)
+		}
+	}
+	var goversion, serve bool
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "goversion":
+			goversion = patch.Mode == "replace"
+		case patch.Path == "internal/app/serve.go" && patch.Marker == "serve":
+			serve = patch.Mode == "replace"
+		}
+	}
+	if !goversion {
+		t.Error("loom does not replace the go.mod goversion region")
+	}
+	if !serve {
+		t.Error("loom does not replace the serve registration region")
+	}
+}
+
+// TestLoomCapabilityPinsGeneratorAndRaisesFloor checks the reproducibility
+// pieces: the generator is pinned in the nested tools/loom module, the go
+// directive region is raised to Loom's floor, and the go.mod snippet requires
+// only the Loom runtime.
+func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
+	fsys := FS()
+	toolsMod, err := fs.ReadFile(fsys, "capabilities/loom/files/tools/go.mod.tmpl")
+	if err != nil {
+		t.Fatalf("read loom tools go.mod: %v", err)
+	}
+	toolsText := string(toolsMod)
+	for _, want := range []string{
+		"tool github.com/Xwudao/loom/cmd/loom",
+		"github.com/Xwudao/loom v0.3.1",
+		"__module__/tools/loom",
+	} {
+		if !strings.Contains(toolsText, want) {
+			t.Errorf("loom tools go.mod is missing %q:\n%s", want, toolsText)
+		}
+	}
+	if _, err := fs.ReadFile(fsys, "capabilities/loom/files/tools/go.sum"); err != nil {
+		t.Errorf("loom tools go.sum is missing: %v", err)
+	}
+	goversion, err := fs.ReadFile(fsys, "capabilities/loom/files/goversion.snippet")
+	if err != nil {
+		t.Fatalf("read goversion snippet: %v", err)
+	}
+	if !strings.Contains(string(goversion), "go 1.25.0") {
+		t.Errorf("goversion snippet = %q, want go 1.25.0", goversion)
+	}
+	deps, err := fs.ReadFile(fsys, "capabilities/loom/files/go.mod.snippet")
+	if err != nil {
+		t.Fatalf("read loom go.mod snippet: %v", err)
+	}
+	if !strings.Contains(string(deps), "require github.com/Xwudao/loom v0.3.1") {
+		t.Errorf("loom go.mod snippet does not pin the runtime:\n%s", deps)
+	}
+	if strings.Contains(string(deps), "golang.org/x/tools") {
+		t.Errorf("loom go.mod snippet leaks the generator dependency:\n%s", deps)
+	}
+	graph, err := fs.ReadFile(fsys, "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read di template: %v", err)
+	}
+	for _, want := range []string{`{{if .Caps.Has "db"}}`, `{{if .Caps.Has "api"}}`, "NewPool", "NewAPIService", "repositoryService"} {
+		if !strings.Contains(string(graph), want) {
+			t.Errorf("di template is missing %q", want)
+		}
+	}
+	if strings.Contains(string(graph), "os.Getenv") {
+		t.Error("di template reads os.Getenv directly; configuration must use the injected EnvLookup")
+	}
+}
+
+// TestNoCapabilityRequiresLoom guards the opt-in contract: loom is never pulled
+// in by another capability.
+func TestNoCapabilityRequiresLoom(t *testing.T) {
+	entries, err := fs.ReadDir(FS(), "capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		d := readDescriptor(t, entry.Name())
+		for _, required := range d.Requires {
+			if required == "loom" {
+				t.Errorf("capability %s requires loom", entry.Name())
+			}
 		}
 	}
 }

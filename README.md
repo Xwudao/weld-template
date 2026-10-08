@@ -38,6 +38,11 @@ capabilities/
     files/         db/migrations (goose), db/query, sqlc.yaml, db/tools (nested
                    module pinning sqlc and goose), internal/data (Repository +
                    pool), generated internal/data/sqlc, snippets
+  loom/            kind: add    -> Loom DI graph, requires http, opt-in
+    capability.json
+    files/         internal/di/di.go.tmpl (capability-aware graph source),
+                   internal/app/serve_loom.go, tools/loom (nested module pinning
+                   the Loom generator), README
 ```
 
 `base` is pure CLI: it never imports `net/http`. `http` owns the single `serve`
@@ -50,6 +55,13 @@ command.
 independent of `http`, `web` and `api`: the repository speaks domain types, not
 sqlc rows, and the JSON DTOs stay in `internal/api`. It can therefore be added
 in any order relative to the HTTP capabilities.
+
+`loom` requires `http` and is **opt-in**: `web`, `api` and `db` never install
+it. It renders `internal/di/di.go` against the installed capability set and
+generates `internal/di/loom_gen.go` with the real pinned generator, so the graph
+follows whatever of `db` and `api` is installed, in either order. It is the only
+capability whose payload is capability aware; every other capability stays
+Loom-free.
 
 ## Database: SQL source of truth and generated code
 
@@ -111,6 +123,20 @@ A capability descriptor is JSON:
 - `requires` lists capabilities that must be installed first. `weld add`
   resolves them automatically, so the order in which a user adds capabilities
   does not matter.
+
+Two optional fields are used only by the `loom` capability, which has to vary
+with the installed set:
+
+- a `file` or `patch` may carry `when: [cap]` / `whenAbsent: [cap]`, so it is
+  planned only when those capabilities are (or are not) installed; and
+- a `patch` may carry `mode: "replace"` to rewrite its region instead of
+  appending, which is how `loom` sets the `go` directive and the `serve`
+  registration.
+
+A capability may also declare a `di` object (`dir`, `source`, `test`). It is a
+`text/template` rendered against the installed capability set and formatted as
+Go; `loom` uses it for the capability-aware dependency graph. Everything else
+stays a plain, unconditional payload.
 
 ## Extension point format
 

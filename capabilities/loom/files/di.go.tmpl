@@ -1,0 +1,341 @@
+// Package di wires the {{.Name}} application with Loom.
+//
+// InitApp is generated from the graph below: Loom constructs the configuration,
+// {{- if .Caps.Has "db"}} the PostgreSQL pool and repository,{{end}}
+{{- if .Caps.Has "api"}} the JSON API service,{{end}}
+// and the HTTP server, registers the server start and stop hooks with the
+// lifecycle, and returns the application and its lifecycle. The graph is the
+// only place that knows the whole composition; the capabilities themselves stay
+// independent.
+//
+// The graph is capability aware: installing db and api regenerates this file
+// and internal/di/loom_gen.go, so the composed application follows the
+// installed capabilities without a runtime registry or service locator.
+package di
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	nethttp "net/http"
+	"os"
+	"strings"
+	"time"
+{{- if and (.Caps.Has "api") (.Caps.Has "db")}}
+
+	"crypto/rand"
+	"encoding/hex"
+{{- end}}
+
+	"github.com/Xwudao/loom"
+{{- if .Caps.Has "api"}}
+	"__module__/internal/api"
+{{- end}}
+{{- if .Caps.Has "db"}}
+	"github.com/jackc/pgx/v5/pgxpool"
+	"__module__/internal/data"
+{{- end}}
+	"__module__/internal/httpserver"
+{{- if .Caps.Has "web"}}
+	"__module__/internal/web"
+{{- end}}
+)
+
+var appGraph = loom.Graph[*App](
+	loom.Name("InitApp"),
+	loom.WithContext(),
+	loom.Provide(OsEnv),
+	loom.Provide(NewConfig),
+{{- if .Caps.Has "db"}}
+	loom.Provide(NewPool),
+	loom.As[data.Repository](NewRepository),
+{{- end}}
+{{- if .Caps.Has "api"}}
+	loom.Provide(NewAPIService),
+{{- end}}
+	loom.Provide(NewServer),
+	loom.Provide(NewApp),
+)
+
+// App is the composed application the serve command runs. It is the composition
+// root: it holds every capability service the graph bound, so the bound
+// repository and API service are constructed even when no route consumes them
+// yet.
+type App struct {
+	Config *Config
+	Server *Server
+{{- if .Caps.Has "api"}}
+	API api.Service
+{{- end}}
+{{- if .Caps.Has "db"}}
+	Repository data.Repository
+{{- end}}
+}
+
+// NewApp is the graph root.
+func NewApp(cfg *Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}{{if .Caps.Has "db"}}, repository data.Repository{{end}}) *App {
+	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}{{if .Caps.Has "db"}}, Repository: repository{{end}}}
+}
+
+type addrKey struct{}
+
+// WithAddr carries the serve listen address into the graph.
+func WithAddr(ctx context.Context, addr string) context.Context {
+	return context.WithValue(ctx, addrKey{}, addr)
+}
+
+// EnvLookup reads an environment variable. It is a dependency rather than a
+// direct os.LookupEnv call so the graph can be built with a fake in tests and
+// the process supplies the real environment.
+type EnvLookup func(key string) (value string, ok bool)
+
+// OsEnv is the process environment reader the graph binds in production.
+func OsEnv() EnvLookup { return os.LookupEnv }
+{{- if .Caps.Has "db"}}
+
+// DatabaseURLEnv names the environment variable that supplies the PostgreSQL
+// dsn. It has no default: a database-backed app must set it explicitly rather
+// than silently fall back to a local database.
+const DatabaseURLEnv = "DATABASE_URL"
+{{- end}}
+
+// Config is the immutable configuration the graph binds.
+//
+// It exposes only what the installed capabilities need: the listen address for
+// http, and the database URL for db.
+type Config struct {
+	Addr string
+{{- if .Caps.Has "db"}}
+	DatabaseURL string
+{{- end}}
+}
+
+// NewConfig loads the configuration from the context and the injected
+// environment lookup, applying defaults and validation.
+//
+// The database URL only seeds the pool: the pool parses the dsn but connects on
+// first use, so building and testing never contact PostgreSQL. Because a
+// database-backed serve must not silently fall back to a local database,
+// DATABASE_URL is required when db is installed: NewConfig fails instead of
+// inventing one. Unit tests inject a fake EnvLookup, so only a real serve needs
+// the variable set. A dsn is never included in an error.
+func NewConfig(ctx context.Context, lookup EnvLookup) (*Config, error) {
+	if lookup == nil {
+		return nil, errors.New("di: nil environment lookup")
+	}
+	addr := ":8080"
+	if value, ok := ctx.Value(addrKey{}).(string); ok {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, errors.New("di: listen address must not be blank")
+		}
+		addr = value
+	}
+	cfg := &Config{Addr: addr}
+{{- if .Caps.Has "db"}}
+	if value, ok := lookup(DatabaseURLEnv); ok {
+		cfg.DatabaseURL = strings.TrimSpace(value)
+	}
+{{- end}}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Validate reports whether the configuration is usable. It is the single
+// validation point for values loaded from the environment.
+func (c *Config) Validate() error {
+	if strings.TrimSpace(c.Addr) == "" {
+		return errors.New("di: listen address must not be blank")
+	}
+{{- if .Caps.Has "db"}}
+	if strings.TrimSpace(c.DatabaseURL) == "" {
+		return errors.New("di: " + DatabaseURLEnv + " is required when the db capability is installed")
+	}
+{{- end}}
+	return nil
+}
+
+{{if .Caps.Has "db"}}
+// NewPool constructs the PostgreSQL pool and returns a cleanup that closes it.
+//
+// pgxpool parses the dsn but connects only on first use, so the graph does not
+// open a connection. The cleanup is registered with the lifecycle as soon as
+// construction succeeds, so the pool is closed exactly once whether a later
+// constructor fails or the lifecycle stops normally.
+func NewPool(ctx context.Context, cfg *Config) (*pgxpool.Pool, loom.Cleanup, error) {
+	pool, err := data.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pool, func(context.Context) error {
+		pool.Close()
+		return nil
+	}, nil
+}
+
+// NewRepository binds the SQL-backed repository.
+func NewRepository(pool *pgxpool.Pool) *data.PostgresRepository {
+	return data.NewRepository(pool)
+}
+{{end}}
+{{- if .Caps.Has "api"}}
+{{- if .Caps.Has "db"}}
+// NewAPIService binds the JSON API service to the PostgreSQL repository, so the
+// HTTP surface persists through the same graph that owns the pool.
+func NewAPIService(repo data.Repository) api.Service {
+	return &repositoryService{repo: repo}
+}
+
+// repositoryService adapts the persistence Repository to the API Service
+// contract. It is the only place that maps between the storage model and the
+// wire DTOs, so neither package depends on the other.
+type repositoryService struct {
+	repo data.Repository
+}
+
+func (s *repositoryService) Create(ctx context.Context, req api.CreateItemRequest) (api.ItemResponse, error) {
+	id, err := newItemID()
+	if err != nil {
+		return api.ItemResponse{}, err
+	}
+	item, err := s.repo.CreateItem(ctx, data.Item{
+		ID:       id,
+		Name:     req.Name,
+		Quantity: req.Quantity,
+		Status:   string(req.Status),
+	})
+	if err != nil {
+		return api.ItemResponse{}, err
+	}
+	return apiItem(item), nil
+}
+
+func (s *repositoryService) List(ctx context.Context, limit int) ([]api.ItemResponse, error) {
+	items, err := s.repo.ListItems(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.ItemResponse, len(items))
+	for i, item := range items {
+		out[i] = apiItem(item)
+	}
+	return out, nil
+}
+
+func (s *repositoryService) Get(ctx context.Context, id string) (api.ItemResponse, error) {
+	item, err := s.repo.GetItem(ctx, id)
+	if err != nil {
+		if errors.Is(err, data.ErrNotFound) {
+			return api.ItemResponse{}, api.ErrNotFound
+		}
+		return api.ItemResponse{}, err
+	}
+	return apiItem(item), nil
+}
+
+func apiItem(item data.Item) api.ItemResponse {
+	return api.ItemResponse{
+		ID:       item.ID,
+		Name:     item.Name,
+		Quantity: item.Quantity,
+		Status:   api.ItemStatus(item.Status),
+	}
+}
+
+func newItemID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return "item-" + hex.EncodeToString(buf[:]), nil
+}
+{{- else}}
+// NewAPIService binds the default in-memory JSON API service. Installing the db
+// capability regenerates the graph so the service is backed by the repository
+// instead.
+func NewAPIService() api.Service {
+	return api.NewService()
+}
+{{- end}}
+{{end}}
+// newMux composes the application handler from the installed capabilities.
+//
+// Route composition is explicit here rather than through a global registry, so
+// the dependency graph is the single source of composition. The reserved /api/
+// namespace takes precedence over the SPA catch-all because net/http resolves
+// the more specific pattern first.
+func newMux({{if .Caps.Has "api"}}service api.Service{{end}}) *nethttp.ServeMux {
+	mux := nethttp.NewServeMux()
+{{- if .Caps.Has "web"}}
+	mux.Handle("/", web.Handler())
+{{- end}}
+{{- if .Caps.Has "api"}}
+	api.Register(mux, service)
+{{- end}}
+	return mux
+}
+
+// Server is the managed HTTP server the graph owns.
+type Server struct {
+	HTTP *nethttp.Server
+
+	// listener is the socket bound in OnStart. It is retained so the bound
+	// address is inspectable and a test can close it to simulate a serve failure.
+	listener net.Listener
+	// fail reports how the serving goroutine ended: the serve error, or nil
+	// after a graceful shutdown. It is buffered so the goroutine never blocks
+	// when nothing reads it.
+	fail chan error
+}
+
+// Fail reports how the serving goroutine ended. It yields the serve error, or
+// nil when the server stopped gracefully.
+func (s *Server) Fail() <-chan error { return s.fail }
+
+// shutdownTimeout bounds graceful teardown when the lifecycle stops.
+const shutdownTimeout = 10 * time.Second
+
+// Stop gracefully stops the server within the shutdown timeout.
+func (s *Server) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return s.HTTP.Shutdown(ctx)
+}
+
+// NewServer builds the HTTP server for the composed handler and registers its
+// start and stop hooks with the lifecycle.
+//
+// OnStart binds the listen address synchronously with net.Listen, so an address
+// already in use fails Start instead of being lost in a background goroutine,
+// then serves in the background. A serve failure is delivered on Fail so the
+// serve command can stop and report it; a graceful shutdown delivers nil.
+func NewServer(lc *loom.Lifecycle, cfg *Config{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
+	server := &Server{
+		HTTP: httpserver.NewServer(cfg.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
+		fail: make(chan error, 1),
+	}
+	lc.Append(loom.Hook{
+		OnStart: func(context.Context) error {
+			listener, err := net.Listen("tcp", cfg.Addr)
+			if err != nil {
+				return fmt.Errorf("di: listen on %s: %w", cfg.Addr, err)
+			}
+			server.listener = listener
+			go func() {
+				err := server.HTTP.Serve(listener)
+				if errors.Is(err, nethttp.ErrServerClosed) {
+					err = nil
+				}
+				server.fail <- err
+			}()
+			return nil
+		},
+		OnStop: func(context.Context) error {
+			return server.Stop()
+		},
+	})
+	return server, nil
+}

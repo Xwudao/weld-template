@@ -1,0 +1,10 @@
+# weld:loom:installed __version__
+.PHONY: generate
+
+# generate rebuilds internal/di/loom_gen.go with the generator pinned in
+# tools/loom. Run it after editing internal/di/di.go; never edit loom_gen.go by
+# hand. `weld add` already runs this when the graph changes.
+generate: ## Regenerate the Loom graph initializer (pinned tool)
+	cd tools/loom && go build -o ../../bin/loom-gen github.com/Xwudao/loom/cmd/loom
+	./bin/loom-gen generate ./internal/di
+	rm -f bin/loom-gen

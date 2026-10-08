@@ -1,0 +1,58 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"__module__/internal/di"
+)
+
+// shutdownTimeout bounds graceful teardown after the process receives a signal.
+const shutdownTimeout = 10 * time.Second
+
+// runServeLoom starts the server through the generated Loom graph.
+//
+// The graph owns construction and the lifecycle; this command only resolves the
+// listen address, installs signal handling and drives Start/Stop, so context
+// cancellation reaches the managed HTTP server. It returns when a signal
+// arrives or the server fails, then stops the lifecycle gracefully and reports
+// any shutdown error alongside that failure.
+func runServeLoom(args []string) (err error) {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	addr := flags.String("addr", ":8080", "address to listen on")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx = di.WithAddr(ctx, *addr)
+
+	app, lifecycle, err := di.InitApp(ctx)
+	if err != nil {
+		return err
+	}
+	if err := lifecycle.Start(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		err = errors.Join(err, lifecycle.Stop(shutdownCtx))
+	}()
+
+	fmt.Fprintf(os.Stderr, "__name__ listening on http://%s\n", app.Config.Addr)
+	select {
+	case <-ctx.Done():
+		return nil
+	case serveErr := <-app.Server.Fail():
+		return serveErr
+	}
+}
