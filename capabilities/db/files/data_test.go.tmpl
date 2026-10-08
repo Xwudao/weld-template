@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,5 +37,30 @@ func TestItemFromSQLC(t *testing.T) {
 func TestNewPoolRejectsMalformedDSN(t *testing.T) {
 	if _, err := NewPool(context.Background(), "://not-a-dsn"); err == nil {
 		t.Fatal("expected an error for a malformed dsn")
+	}
+}
+
+// TestNewPoolDoesNotEchoDSN guards the credential leak this boundary must never
+// open: a malformed dsn can carry a password, and the caller (the top-level
+// logger) logs the error NewPool returns, so that error must not quote the dsn
+// or the parser detail. Every dsn embeds a sentinel password and is malformed in
+// a way the pgx parser error quotes (a colon or fragment inside the password, or
+// a bad port), so a regression to passing the parser error through fails here.
+func TestNewPoolDoesNotEchoDSN(t *testing.T) {
+	const password = "sentinel-do-not-log"
+	dsns := []string{
+		"postgres://user:" + password + "@host:notaport/db",
+		"postgres://user:" + password + ":extra@host:notaport/db",
+		"postgres://user:" + password + "#fragment@host:notaport/db",
+		"host=host password=" + password + " user=user port=notaport",
+	}
+	for _, dsn := range dsns {
+		_, err := NewPool(context.Background(), dsn)
+		if err == nil {
+			t.Fatalf("NewPool(%q) succeeded, want an error", dsn)
+		}
+		if strings.Contains(err.Error(), password) {
+			t.Errorf("NewPool(%q) error echoes the credential: %v", dsn, err)
+		}
 	}
 }

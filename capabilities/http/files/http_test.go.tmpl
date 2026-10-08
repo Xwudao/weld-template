@@ -1,8 +1,11 @@
 package httpserver
 
 import (
+	"bytes"
+	"log/slog"
 	nethttp "net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +40,23 @@ func TestNewServerConfiguresWithoutListening(t *testing.T) {
 	}
 	if server.ReadHeaderTimeout <= 0 {
 		t.Fatal("ReadHeaderTimeout is not set")
+	}
+}
+
+// TestServeReportsOccupiedPortWithoutListening covers the ordering regression:
+// Serve must bind the socket before it records the listening line, so an
+// address already in use fails without printing a false success. The occupying
+// server is closed by the test, so no socket is leaked.
+func TestServeReportsOccupiedPortWithoutListening(t *testing.T) {
+	occupied := httptest.NewServer(NewHandler())
+	defer occupied.Close()
+
+	var records bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&records, nil))
+	if err := Serve(logger, occupied.Listener.Addr().String(), NewHandler()); err == nil {
+		t.Fatal("Serve succeeded on an occupied port")
+	}
+	if strings.Contains(records.String(), "listening") {
+		t.Fatalf("Serve logged a listening line before binding a socket:\n%s", records.String())
 	}
 }

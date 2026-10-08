@@ -2,15 +2,16 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"__module__/internal/app"
+	"__module__/internal/logging"
 )
 
 func main() {
+	logger := logging.New(os.Stderr, logging.TextFormat, nil)
 	if err := app.Run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		logger.Error("__name__ failed", "error", err)
 		os.Exit(1)
 	}
 }

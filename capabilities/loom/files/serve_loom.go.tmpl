@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -48,7 +47,8 @@ func runServeLoom(args []string) (err error) {
 		err = errors.Join(err, lifecycle.Stop(shutdownCtx))
 	}()
 
-	fmt.Fprintf(os.Stderr, "__name__ listening on http://%s\n", app.Config.Addr)
+	// The graph's injected logger records startup, failure and shutdown from the
+	// server lifecycle, so this command only drives Start/Stop.
 	select {
 	case <-ctx.Done():
 		return nil

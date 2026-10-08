@@ -2,12 +2,14 @@
   "name": "base",
   "version": "0.1.0",
   "kind": "base",
-  "summary": "Minimal, dependency-free Go CLI with a command-registry extension point.",
+  "summary": "Minimal, dependency-free Go CLI with a command-registry extension point and a log/slog logger factory.",
   "requires": [],
   "files": [
     { "path": "go.mod", "source": "files/go.mod.tmpl" },
     { "path": "main.go", "source": "files/main.go.tmpl" },
     { "path": "internal/app/app.go", "source": "files/app.go.tmpl" },
+    { "path": "internal/logging/logging.go", "source": "files/logging.go.tmpl" },
+    { "path": "internal/logging/logging_test.go", "source": "files/logging_test.go.tmpl" },
     { "path": "Makefile", "source": "files/Makefile.tmpl" },
     { "path": "README.md", "source": "files/README.md.tmpl" },
     { "path": ".gitignore", "source": "files/gitignore.txt" }

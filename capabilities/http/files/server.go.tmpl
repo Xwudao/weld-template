@@ -2,8 +2,9 @@ package httpserver
 
 import (
 	"fmt"
+	"log/slog"
+	"net"
 	nethttp "net/http"
-	"os"
 	"time"
 )
 
@@ -22,11 +23,21 @@ func NewServer(addr string, handler nethttp.Handler) *nethttp.Server {
 	}
 }
 
-// Serve listens on addr and serves handler until the server fails.
-func Serve(addr string, handler nethttp.Handler) error {
+// Serve binds addr, serves handler and returns when the server fails.
+//
+// The socket is bound synchronously with net.Listen before anything is logged,
+// so an address already in use fails here and a failed startup never prints a
+// listening line; the listener is then handed to the server. The logger is
+// injected rather than created here, so the caller owns the sink and format and
+// no package reaches for a global logger.
+func Serve(logger *slog.Logger, addr string, handler nethttp.Handler) error {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("httpserver: listen on %s: %w", addr, err)
+	}
+	logger.Info("__name__ listening", "addr", displayAddr(addr))
 	server := NewServer(addr, handler)
-	fmt.Fprintf(os.Stderr, "__name__ listening on http://%s\n", displayAddr(addr))
-	return server.ListenAndServe()
+	return server.Serve(listener)
 }
 
 // displayAddr turns a listen address into something clickable.

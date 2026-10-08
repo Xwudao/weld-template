@@ -14,6 +14,7 @@ constructs are the ones the process uses.
 | --- | --- | --- |
 | `EnvLookup` | always | `OsEnv` (`os.LookupEnv`) in production; tests inject a fake |
 | `*Config` | always | an immutable config built and validated by `NewConfig`: the listen address (`serve --addr`, else `:8080`) for http, and `DATABASE_URL` for db (only that field when db is installed) |
+| `*slog.Logger` | always | `NewLogger`, which builds the base `log/slog` handler on stderr; injected into the server so startup, a serve failure and a shutdown are logged through one protocol, with no process default logger and no custom logger interface |
 | `*pgxpool.Pool` | `db` | `data.NewPool`; the pool parses the dsn lazily and is **not** connected at build, test or startup, and its cleanup closes it exactly once |
 | `data.Repository` | `db` | `data.NewRepository(pool)` |
 | `api.Service` | `api` | the SQL-backed service when `db` is installed, otherwise `api.NewService()` |
@@ -63,4 +64,6 @@ changes the provider set. Do not edit `loom_gen.go`.
 `di_test.go` exercises the composed graph with no PostgreSQL: the pool is only
 parsed, configuration is driven through an injected `EnvLookup`, the API service
 is driven through an injected in-memory repository, and the lifecycle's bind,
-serve-failure and graceful-stop behavior is exercised on loopback sockets.
+serve-failure and graceful-stop behavior is exercised on loopback sockets. The
+lifecycle tests inject a logger backed by an `io.Discard` or in-memory writer, so
+startup and shutdown logging is asserted without touching the process streams.

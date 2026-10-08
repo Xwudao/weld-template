@@ -405,6 +405,103 @@ func TestBaseCapabilityIsCLIOnly(t *testing.T) {
 	}
 }
 
+// TestBaseCapabilityShipsInjectedLogger guards the logging milestone: base ships
+// a log/slog factory and main logs the failed command through it, with no
+// competing error path and no global logger.
+func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
+	d := readDescriptor(t, "base")
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{"internal/logging/logging.go", "internal/logging/logging_test.go"} {
+		if !paths[want] {
+			t.Errorf("base capability does not ship %s", want)
+		}
+	}
+
+	loggingGo, err := fs.ReadFile(FS(), "capabilities/base/files/logging.go.tmpl")
+	if err != nil {
+		t.Fatalf("read logging.go: %v", err)
+	}
+	for _, want := range []string{"\"log/slog\"", "NewTextHandler", "NewJSONHandler"} {
+		if !strings.Contains(string(loggingGo), want) {
+			t.Errorf("logging.go is missing %q", want)
+		}
+	}
+
+	mainGo, err := fs.ReadFile(FS(), "capabilities/base/files/main.go.tmpl")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainText := string(mainGo)
+	for _, want := range []string{"logging.New", "logger.Error"} {
+		if !strings.Contains(mainText, want) {
+			t.Errorf("main.go is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"fmt.Fprintln", "log.Fatal", "slog.SetDefault"} {
+		if strings.Contains(mainText, forbidden) {
+			t.Errorf("main.go still uses a competing error path %q:\n%s", forbidden, mainText)
+		}
+	}
+}
+
+// TestHTTPCapabilityInjectsLogger guards the http logging wiring: Serve takes an
+// injected *slog.Logger and no longer writes the listening line to stderr
+// directly.
+func TestHTTPCapabilityInjectsLogger(t *testing.T) {
+	serverGo, err := fs.ReadFile(FS(), "capabilities/http/files/server.go.tmpl")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	serverText := string(serverGo)
+	if !strings.Contains(serverText, "logger *slog.Logger") {
+		t.Errorf("Serve does not accept an injected logger:\n%s", serverText)
+	}
+	if !strings.Contains(serverText, "logger.Info") {
+		t.Errorf("Serve does not log through the injected logger:\n%s", serverText)
+	}
+	if strings.Contains(serverText, "os.Stderr") || strings.Contains(serverText, "fmt.Fprintf") {
+		t.Errorf("server.go still writes to the process streams directly:\n%s", serverText)
+	}
+
+	serveGo, err := fs.ReadFile(FS(), "capabilities/http/files/serve.go.tmpl")
+	if err != nil {
+		t.Fatalf("read serve.go: %v", err)
+	}
+	if !strings.Contains(string(serveGo), "logging.New") {
+		t.Errorf("serve.go does not build the logger from the base factory:\n%s", serveGo)
+	}
+}
+
+// TestLoomCapabilityBindsLogger guards the Loom logging wiring: the graph
+// provides a *slog.Logger, the managed server consumes it, and the serve
+// command leaves startup/shutdown logging to the lifecycle.
+func TestLoomCapabilityBindsLogger(t *testing.T) {
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read di template: %v", err)
+	}
+	graphText := string(graph)
+	for _, want := range []string{"loom.Provide(NewLogger)", "func NewLogger() *slog.Logger", "logger *slog.Logger", "logging.New"} {
+		if !strings.Contains(graphText, want) {
+			t.Errorf("di template is missing %q", want)
+		}
+	}
+	if strings.Contains(graphText, "slog.SetDefault") {
+		t.Error("di template calls slog.SetDefault; the logger must be injected")
+	}
+
+	serveGo, err := fs.ReadFile(FS(), "capabilities/loom/files/serve_loom.go.tmpl")
+	if err != nil {
+		t.Fatalf("read serve_loom.go: %v", err)
+	}
+	if strings.Contains(string(serveGo), "fmt.Fprintf(os.Stderr") {
+		t.Errorf("serve_loom.go still prints the listening line directly:\n%s", serveGo)
+	}
+}
+
 // TestLoomCapabilityRequiresHTTPAndDeclaresGraph guards the loom capability's
 // contract: it is additive, needs only http, declares a capability-aware DI
 // graph, and replaces (never appends to) the serve registration and go directive

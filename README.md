@@ -18,7 +18,9 @@ its version in the project manifest (`weld.json`).
 capabilities/
   base/            kind: base   -> scaffolds a minimal, dependency-free CLI
     capability.json
-    files/         main.go, internal/app (dispatch + command registry),
+    files/         main.go (builds the logger, logs a failed command),
+                   internal/app (dispatch + command registry),
+                   internal/logging (log/slog factory, injectable writer),
                    Makefile, README, .gitignore
   http/            kind: add    -> HTTP lifecycle + composable handler builder
     capability.json
@@ -45,8 +47,12 @@ capabilities/
                    the Loom generator), README
 ```
 
-`base` is pure CLI: it never imports `net/http`. `http` owns the single `serve`
-command and the composable mux. `web` and `api` each require `http` and
+`base` is pure CLI: it never imports `net/http`. It ships `internal/logging`, a
+small factory over `log/slog` (`New(w io.Writer, format Format, options
+*slog.HandlerOptions)`), so the process has one logging protocol with an
+injectable sink and no custom logger interface. `http` owns the single `serve`
+command and the composable mux; its `Serve` takes the injected `*slog.Logger`.
+`web` and `api` each require `http` and
 contribute only their own handler through explicit composition points. They are
 independent: either can be added first, and both are served by the same `serve`
 command.
@@ -61,7 +67,9 @@ it. It renders `internal/di/di.go` against the installed capability set and
 generates `internal/di/loom_gen.go` with the real pinned generator, so the graph
 follows whatever of `db` and `api` is installed, in either order. It is the only
 capability whose payload is capability aware; every other capability stays
-Loom-free.
+Loom-free. The graph also provides the `*slog.Logger` (via `NewLogger`) that the
+managed HTTP server uses to record startup, a serve failure and a graceful
+shutdown, so the logger is injected rather than reached for through a global.
 
 ## Database: SQL source of truth and generated code
 
@@ -219,4 +227,7 @@ sqlc output plus a pinned sqlc/goose tool module, and patches the `go.mod`
 dependency and Makefile `db` extension points. It also proves the migration
 targets are guarded (no `psql`, explicit `DATABASE_URL`, one-step confirmed
 down) and the integration test isolates itself in its own schema with no global
-`DROP TABLE`.
+`DROP TABLE`. For the logging milestone it proves `base` ships the `log/slog`
+factory and `main` logs a failed command through it (no `fmt.Fprintln`, no
+process default logger), that `httpserver.Serve` takes an injected logger, and
+that the Loom graph provides and injects one.

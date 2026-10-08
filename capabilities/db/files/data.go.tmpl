@@ -57,10 +57,16 @@ type Repository interface {
 // Call pool.Ping(ctx) to verify connectivity and pool.Close() when done. The
 // dsn is a caller-supplied value (for example from an environment variable) and
 // is never read or logged here, so no credential enters this package.
+//
+// A dsn that does not parse reports a fixed error rather than the parser's own:
+// the parser error can quote the dsn and its password, and the caller logs the
+// error it gets back, so this boundary must not carry a credential into a log
+// record.
 func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("data: invalid PostgreSQL dsn: %w", err)
+		// Do not echo the dsn or the parser error: either may carry a credential.
+		return nil, errors.New("data: invalid PostgreSQL dsn")
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

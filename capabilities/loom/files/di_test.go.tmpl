@@ -1,16 +1,20 @@
 package di
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Xwudao/loom"
+	"__module__/internal/logging"
 {{- if .Caps.Has "api"}}
 	nethttp "net/http"
 	"net/http/httptest"
-	"strings"
 {{- end}}
 {{- if and (.Caps.Has "api") (.Caps.Has "db")}}
 	"encoding/json"
@@ -73,15 +77,21 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 }
 
 // newServerForTest builds a server against the installed graph providers,
-// injecting the default or in-memory service so the bind/serve lifecycle is
-// exercised without PostgreSQL.
-func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string) *Server {
+// injecting the default or in-memory service and a logger so the bind/serve
+// lifecycle is exercised without PostgreSQL and without a global logger.
+func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer(lifecycle, &Config{Addr: addr}{{if .Caps.Has "api"}}, NewAPIService({{if .Caps.Has "db"}}newFakeRepository(){{end}}){{end}})
+	server, err := NewServer(lifecycle, &Config{Addr: addr}, logger{{if .Caps.Has "api"}}, NewAPIService({{if .Caps.Has "db"}}newFakeRepository(){{end}}){{end}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	return server
+}
+
+// discardLogger is the injected logger for lifecycle tests that do not assert
+// on output.
+func discardLogger() *slog.Logger {
+	return logging.New(io.Discard, logging.TextFormat, nil)
 }
 
 // TestServerBindFailureFailsStart proves a port already in use fails Start
@@ -94,7 +104,7 @@ func TestServerBindFailureFailsStart(t *testing.T) {
 	defer occupied.Close()
 
 	lifecycle := loom.NewLifecycle()
-	newServerForTest(t, lifecycle, occupied.Addr().String())
+	newServerForTest(t, lifecycle, occupied.Addr().String(), discardLogger())
 	if err := lifecycle.Start(context.Background()); err == nil {
 		t.Fatal("Start succeeded on an occupied port")
 	}
@@ -104,7 +114,7 @@ func TestServerBindFailureFailsStart(t *testing.T) {
 // instead of leaving it waiting forever.
 func TestServerReportsRuntimeFailure(t *testing.T) {
 	lifecycle := loom.NewLifecycle()
-	server := newServerForTest(t, lifecycle, "127.0.0.1:0")
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
 	ctx := context.Background()
 	if err := lifecycle.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -130,7 +140,7 @@ func TestServerReportsRuntimeFailure(t *testing.T) {
 // without reporting a failure.
 func TestServerStopsGracefully(t *testing.T) {
 	lifecycle := loom.NewLifecycle()
-	server := newServerForTest(t, lifecycle, "127.0.0.1:0")
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
 	ctx := context.Background()
 	if err := lifecycle.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -145,6 +155,35 @@ func TestServerStopsGracefully(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the server to stop")
+	}
+}
+
+// TestServerLogsLifecycle proves the server logs through the injected logger:
+// a buffer as the sink records the startup and shutdown transitions, and no
+// global logger is involved.
+func TestServerLogsLifecycle(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.TextFormat, nil)
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", logger)
+	ctx := context.Background()
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := lifecycle.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-server.Fail():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the server to stop")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "listening") {
+		t.Fatalf("startup was not logged through the injected logger:\n%s", out)
+	}
+	if !strings.Contains(out, "shutting down") {
+		t.Fatalf("shutdown was not logged through the injected logger:\n%s", out)
 	}
 }
 

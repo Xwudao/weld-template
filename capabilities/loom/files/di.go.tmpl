@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	nethttp "net/http"
 	"os"
@@ -37,6 +38,7 @@ import (
 	"__module__/internal/data"
 {{- end}}
 	"__module__/internal/httpserver"
+	"__module__/internal/logging"
 {{- if .Caps.Has "web"}}
 	"__module__/internal/web"
 {{- end}}
@@ -47,6 +49,7 @@ var appGraph = loom.Graph[*App](
 	loom.WithContext(),
 	loom.Provide(OsEnv),
 	loom.Provide(NewConfig),
+	loom.Provide(NewLogger),
 {{- if .Caps.Has "db"}}
 	loom.Provide(NewPool),
 	loom.As[data.Repository](NewRepository),
@@ -92,6 +95,15 @@ type EnvLookup func(key string) (value string, ok bool)
 
 // OsEnv is the process environment reader the graph binds in production.
 func OsEnv() EnvLookup { return os.LookupEnv }
+
+// NewLogger constructs the application logger the graph binds.
+//
+// The logger is a graph dependency so every component that logs shares one
+// handler; nothing installs a process-wide default logger. It writes to stderr,
+// the sink a command-line server owns.
+func NewLogger() *slog.Logger {
+	return logging.New(os.Stderr, logging.TextFormat, nil)
+}
 {{- if .Caps.Has "db"}}
 
 // DatabaseURLEnv names the environment variable that supplies the PostgreSQL
@@ -282,6 +294,9 @@ func newMux({{if .Caps.Has "api"}}service api.Service{{end}}) *nethttp.ServeMux 
 type Server struct {
 	HTTP *nethttp.Server
 
+	// logger records the server lifecycle: startup, a serve failure and a
+	// graceful shutdown. It is the graph's injected logger.
+	logger *slog.Logger
 	// listener is the socket bound in OnStart. It is retained so the bound
 	// address is inspectable and a test can close it to simulate a serve failure.
 	listener net.Listener
@@ -311,11 +326,13 @@ func (s *Server) Stop() error {
 // OnStart binds the listen address synchronously with net.Listen, so an address
 // already in use fails Start instead of being lost in a background goroutine,
 // then serves in the background. A serve failure is delivered on Fail so the
-// serve command can stop and report it; a graceful shutdown delivers nil.
-func NewServer(lc *loom.Lifecycle, cfg *Config{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
+// serve command can stop and report it; a graceful shutdown delivers nil. The
+// injected logger records the startup, failure and shutdown transitions.
+func NewServer(lc *loom.Lifecycle, cfg *Config, logger *slog.Logger{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
 	server := &Server{
-		HTTP: httpserver.NewServer(cfg.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
-		fail: make(chan error, 1),
+		HTTP:   httpserver.NewServer(cfg.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
+		logger: logger,
+		fail:   make(chan error, 1),
 	}
 	lc.Append(loom.Hook{
 		OnStart: func(context.Context) error {
@@ -324,17 +341,26 @@ func NewServer(lc *loom.Lifecycle, cfg *Config{{if .Caps.Has "api"}}, service ap
 				return fmt.Errorf("di: listen on %s: %w", cfg.Addr, err)
 			}
 			server.listener = listener
+			logger.Info("__name__ listening", "addr", listener.Addr().String())
 			go func() {
 				err := server.HTTP.Serve(listener)
 				if errors.Is(err, nethttp.ErrServerClosed) {
 					err = nil
+				}
+				if err != nil {
+					logger.Error("__name__ serve failed", "error", err)
 				}
 				server.fail <- err
 			}()
 			return nil
 		},
 		OnStop: func(context.Context) error {
-			return server.Stop()
+			logger.Info("__name__ shutting down")
+			if err := server.Stop(); err != nil {
+				logger.Error("__name__ shutdown failed", "error", err)
+				return err
+			}
+			return nil
 		},
 	})
 	return server, nil
