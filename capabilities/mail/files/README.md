@@ -21,10 +21,13 @@ err = sender.Send(ctx, mailsender.Message{
 ```
 
 `New` validates the `mail` section and stores the settings. It sends nothing and
-opens no connection. Every `Send` dials the configured server, applies the
-configured TLS policy, authenticates when credentials are set, submits the
-message and quits. There is no connection pool, no background goroutine, no
-queue and no outbox; `ctx` and the configured `timeout_seconds` bound each call.
+opens no connection. Every `Send` builds a go-mail client, dials the configured
+server, applies the configured TLS policy, authenticates when credentials are
+set, submits the message and quits. There is no connection pool, no background
+goroutine, no queue and no outbox; `ctx` and the configured `timeout_seconds`
+bound each call. The SMTP session and the MIME message are
+`github.com/wneessen/go-mail`'s job, so this package does not hand-write the
+protocol or the message format.
 
 When both `Text` and `HTML` are set the message is `multipart/alternative` with a
 `text/plain` part followed by a `text/html` part, so a mail client shows the
@@ -47,7 +50,12 @@ reduced to their bare form.
 | `starttls` | a plain connection, then a required `STARTTLS` upgrade before any credential is sent. A server that does not advertise `STARTTLS` fails the send |
 | `implicit` | TLS from the first byte (SMTPS), before the SMTP greeting |
 
-Production TLS requires TLS 1.2 or newer and verifies the server certificate.
+Production TLS requires TLS 1.2 or newer and verifies the server certificate:
+the sender never sets `InsecureSkipVerify`, so a self-signed server fails the
+send instead of being trusted silently. A server-supplied error reply can echo
+the base64 credential it received during `AUTH`, so `Send` never returns the
+library's error text; it reports a fixed failure and preserves an expired or
+canceled context.
 
 ## Configuration
 
@@ -70,40 +78,30 @@ without changing the sender, this package or its tests.
 ## With Loom
 
 If the project also has the Loom capability, `weld add mail` writes
-`internal/di/mail_provider.go`, a stable seam that declares `NewMailSender`. The
-mail capability deliberately edits no shared Loom file, so the generated graph
-does **not** declare this provider the way it declares `NewRedisClient`. To
-switch mail on:
+`internal/di/mail_provider.go`, a stable seam that declares `NewMailSender` as an
+available binding. The generated graph declares it but nothing depends on
+`*mailsender.Sender`, so Loom prunes it: an ordinary serve constructs no sender
+and needs no mail setting.
 
-1. Install `loom` before `mail`. `mail_provider.go` is written from the mail
-   capability only, so it exists only when loom was already installed.
-2. Add the binding to the graph by hand, in `internal/di/di.go`:
+Whichever of `mail` and `loom` is installed second writes the provider seam
+(both capabilities carry the same template, each guarded by the other), so the
+install order does not matter and `di.go` is never hand-edited.
 
-   ```go
-   loom.Provide(NewMailSender),
-   ```
+To use the sender, make a provider the graph already consumes depend on
+`*mailsender.Sender`. `mail_provider.go` is written once and never regenerated,
+so those edits survive every later `weld add`.
 
-   `di.go` is regenerated, so this line is erased by the next `weld add`; see
-   step 3 for the durable alternative.
-3. Make a provider the graph already consumes depend on `*mailsender.Sender`
-   and edit the stable file that holds it (for an `api` + `loom` project, edit
-   `internal/di/api_provider.go`). Loom then constructs `NewMailSender`,
-   validates the mail configuration and injects the sender. That edit survives
-   every later `weld add`.
-
-Because `NewMailSender` never dials and never sends, constructing the graph
-still sends no mail; the first `Send` is the first connection. Adding the
-`{{- if .Caps.Has "mail"}}` block to the shared `loom` graph template would
-remove step 2, but the mail capability intentionally leaves shared Loom files
-untouched.
+Because `NewMailSender` never dials and never sends, building the graph, running
+tests and starting the process still send no mail; the first `Send` is the first
+connection.
 
 ## Tests
 
-The tests run a real in-process SMTP server on loopback: it speaks the SMTP
-greeting, `EHLO`/`STARTTLS`/`AUTH`/`MAIL`/`RCPT`/`DATA`/`QUIT` protocol with a
-self-signed certificate, and the sender talks to it through the real `net/smtp`
-client, so the plain, STARTTLS and implicit-TLS paths are the real protocol
-paths. No external SMTP server is needed:
+The tests are focused: they prove the constructor is idle, that message
+validation rejects a malformed envelope before any connection, and that one send
+reaches a minimal in-process SMTP server on loopback. The SMTP session and the
+MIME message are go-mail's job, so there is no protocol implementation to test
+here. No external SMTP server is needed:
 
 ```sh
 go test ./internal/mailsender/...

@@ -2,14 +2,18 @@
   "name": "cron",
   "version": "0.1.0",
   "kind": "add",
-  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs, overlap skipping, panic recovery and a UTC-default timezone. Installing it schedules nothing on its own.",
+  "summary": "Opt-in in-process scheduler: a named job registry with explicit Start/Stop, five-field cron specs, overlap skipping, panic recovery and a UTC-default timezone. Installing it schedules nothing on its own; the scheduler starts and stops with the serve command and jobs are declared in a stable registration file.",
   "requires": ["base", "config"],
   "files": [
     { "path": "internal/cron/cron.go", "source": "files/cron.go.tmpl" },
     { "path": "internal/cron/cron_test.go", "source": "files/cron_test.go.tmpl" },
+    { "path": "internal/cron/register.go", "source": "files/register.go.tmpl" },
     { "path": "internal/cron/README.md", "source": "files/README.md" },
     { "path": "internal/config/cron.go", "source": "files/cron_config.go.tmpl" },
-    { "path": "internal/config/cron_test.go", "source": "files/cron_config_test.go.tmpl" }
+    { "path": "internal/config/cron_test.go", "source": "files/cron_config_test.go.tmpl" },
+    { "path": "internal/app/cron.go", "source": "files/app_runtime.go.tmpl" },
+    { "path": "internal/app/cron_test.go", "source": "files/app_runtime_test.go.tmpl" },
+    { "path": "internal/di/cron_provider.go", "source": "files/cron_provider.go.tmpl", "when": ["loom"] }
   ],
   "patches": [
     { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },

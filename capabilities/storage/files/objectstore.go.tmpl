@@ -151,7 +151,9 @@ func (s *Store) Close() error {
 // The body is streamed to the server rather than buffered in memory, so a large
 // object never has to fit in RAM. Upload does not create the bucket and does not
 // retry: the caller passes a context to cancel the transfer. The body is
-// single-use, so a non-seekable reader is consumed exactly once.
+// single-use, so a non-seekable reader is consumed exactly once over the default
+// TLS endpoint; an endpoint explicitly set to plaintext http signs the payload
+// hash and therefore needs a seekable body.
 func (s *Store) Upload(ctx context.Context, key string, body io.Reader) (string, error) {
 	if body == nil {
 		return "", errors.New("objectstore: upload body is required")

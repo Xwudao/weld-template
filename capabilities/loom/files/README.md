@@ -20,6 +20,9 @@ constructs are the ones the process uses.
 | `data.Repository` | `db` | `data.NewRepository(pool)`; the binding exists so a user's own provider can consume it, not so the default graph constructs it |
 | `*redis.Client` | `redis` | `redisclient.New` through `NewRedisClient`, defined in the stable `redis_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*redis.Client`, so a plain serve builds no client and needs no Redis setting. When a consumer asks for it, Loom validates the `redis` section, builds the lazy client (it is **not connected** at build, test or startup) and registers a cleanup that closes it exactly once |
 | `api.Service` | `api` | defined by `api_provider.go` (the stable wiring seam), defaulting to `api.NewService()`, the in-memory development demo. Installing `db` or `redis` does **not** switch it to PostgreSQL or Redis |
+| `*mailsender.Sender` | `mail` | `mailsender.New` through `NewMailSender`, defined in the stable `mail_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*mailsender.Sender`, so a plain serve builds no sender and needs no mail setting. When a consumer asks for it, Loom validates the `mail` section and builds the sender (it is **not connected** at build, test or startup) |
+| `*objectstore.Store` | `storage` | `objectstore.New` through `NewObjectStore`, defined in the stable `storage_provider.go` seam; **declared but not part of the default composition**. Loom prunes it while nothing depends on `*objectstore.Store`, so a plain serve builds no store and needs no storage setting. When a consumer asks for it, Loom validates the `storage` section, builds the client (it is **not connected** at build, test or startup) and registers a cleanup that releases the store's idle connections exactly once |
+| `*cron.Scheduler` | `cron` | `cron.New` through `NewScheduler`, defined in the stable `cron_provider.go` seam. Unlike the bindings above, the graph root consumes it, so Loom always constructs it and its start/stop hooks run with the server. `NewScheduler` takes the server, so the socket is bound before the scheduler starts and the scheduler stops before the server. It starts no jobs until `internal/cron/register.go` registers them |
 | `*httpserver.Server` | always | the composed mux plus its `loom.Hook` start/stop lifecycle |
 | `*App` | always | the graph root returned by `InitApp` |
 
@@ -76,6 +79,29 @@ command, so building the graph, running tests and starting the process need no
 Redis server, and the lifecycle closes the client exactly once when it was
 constructed. See `internal/redisclient/README.md`.
 
+### Mail and storage are declared but pruned
+
+`weld add mail` and `weld add storage` follow the redis pattern: `NewMailSender`
+and `NewObjectStore` live in the stable `mail_provider.go` and
+`storage_provider.go` seams (written once, by whichever of the capability and
+`loom` is installed second), and the graph declares them but nothing depends on
+`*mailsender.Sender` or `*objectstore.Store`, so Loom prunes them. An ordinary
+serve builds neither and needs neither setting. To use one, make a provider the
+graph already consumes depend on it (again, edit `api_provider.go` for an
+api+loom project). Construction never connects and never sends. See
+`internal/mailsender/README.md` and `internal/objectstore/README.md`.
+
+### Cron is wired, not pruned
+
+`weld add cron` is different: the graph root consumes `*cron.Scheduler`, so Loom
+constructs `NewScheduler` (in the stable `cron_provider.go` seam) and registers
+its `loom.Hook` start/stop. `NewScheduler` takes the `*httpserver.Server`, and
+Loom constructs providers in dependency order and appends hooks as it
+constructs them, so the socket is bound before the scheduler starts and the
+scheduler stops before the server — the same guarantee the Loom serve command
+relies on. The scheduler starts no jobs until `internal/cron/register.go`
+registers them, and it takes no database or Redis lock. See `internal/cron/README.md`.
+
 Never wire providers into `di.go`: it is regenerated from the installed
 capability set, and an edit there is erased by the next capability install.
 
@@ -114,10 +140,12 @@ make generate
 ```
 
 `weld add` already regenerates `di.go`, `di_test.go` and `loom_gen.go` for you
-when an installed capability changes the provider set. Do not edit them.
-`api_provider.go` is the exception: weld writes it once (when both `api` and
-`loom` are installed) and never regenerates it, so edit that file to wire a
-persistent API service.
+when an installed capability changes the provider set. Do not edit them. The
+stable provider seams — `api_provider.go`, `redis_provider.go`,
+`mail_provider.go`, `storage_provider.go` and `cron_provider.go` — are the
+exception: weld writes each once (when the capability and `loom` are both
+installed, whichever arrives second) and never regenerates it, so edit those
+files to wire dependencies.
 
 ## Tests
 

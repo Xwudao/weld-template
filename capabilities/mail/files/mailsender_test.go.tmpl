@@ -1,25 +1,17 @@
 package mailsender
 
-// The tests run a real in-process SMTP server on loopback and talk to it through
-// the real net/smtp client, so the plain, STARTTLS and implicit-TLS paths are
-// the real protocol paths. No external SMTP server is needed.
+// The tests are focused: they prove the constructor is idle, that message
+// validation rejects a malformed envelope before any connection, and that one
+// send reaches a real in-process SMTP server. The SMTP session and the MIME
+// message are go-mail's job, so there is no protocol implementation to test here.
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"math/big"
 	"net"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"__module__/internal/config"
 )
@@ -31,207 +23,13 @@ type staticProvider struct{ settings config.Mail }
 
 func (p staticProvider) MailSettings() config.Mail { return p.settings }
 
-// recordingServer is a minimal but real SMTP server for tests. It speaks the
-// greeting, EHLO/HELO, STARTTLS, AUTH, MAIL, RCPT, DATA and QUIT commands it
-// needs to be driven by net/smtp, and records the envelope and body it saw.
-type recordingServer struct {
-	listener  net.Listener
-	tlsConfig *tls.Config
-	startTLS  bool
-	authPlain bool
-
-	mu       sync.Mutex
-	from     string
-	to       []string
-	data     []byte
-	usedTLS  bool
-	authSeen bool
-}
-
-// serverTLS generates a self-signed certificate for 127.0.0.1 and returns the
-// server configuration plus a pool that trusts it.
-func serverTLS(t *testing.T) (*tls.Config, *x509.CertPool) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "127.0.0.1"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	certificate, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse certificate: %v", err)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(certificate)
-	server := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
-	return server, pool
-}
-
-// startServer starts the server on loopback and returns its host and port. It
-// stops on test cleanup.
-func startServer(t *testing.T, server *recordingServer) (string, int) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	server.listener = listener
-	go server.serve()
-	t.Cleanup(func() { _ = listener.Close() })
-	addr := listener.Addr().(*net.TCPAddr)
-	return addr.IP.String(), addr.Port
-}
-
-func (s *recordingServer) serve() {
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			return
-		}
-		go s.handle(conn)
-	}
-}
-
-func (s *recordingServer) handle(conn net.Conn) {
-	defer conn.Close()
-	if s.tlsConfig != nil && !s.startTLS {
-		// Implicit TLS: wrap the connection before the greeting.
-		tlsConn := tls.Server(conn, s.tlsConfig)
-		if err := tlsConn.Handshake(); err != nil {
-			return
-		}
-		conn = tlsConn
-		s.markTLS()
-	}
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-	writeLine := func(line string) {
-		_, _ = writer.WriteString(line + "\r\n")
-		_ = writer.Flush()
-	}
-	writeLine("220 test ESMTP")
-
-	inData := false
-	var data bytes.Buffer
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if inData {
-			if line == "." {
-				inData = false
-				s.mu.Lock()
-				s.data = data.Bytes()
-				s.mu.Unlock()
-				writeLine("250 OK: queued")
-				continue
-			}
-			if strings.HasPrefix(line, "..") {
-				line = line[1:]
-			}
-			data.WriteString(line + "\r\n")
-			continue
-		}
-		upper := strings.ToUpper(line)
-		switch {
-		case strings.HasPrefix(upper, "EHLO"):
-			if s.startTLS {
-				writeLine("250-test")
-				writeLine("250-STARTTLS")
-				writeLine("250 AUTH PLAIN")
-			} else {
-				writeLine("250 test")
-			}
-		case strings.HasPrefix(upper, "HELO"):
-			writeLine("250 test")
-		case upper == "STARTTLS":
-			writeLine("220 Ready to start TLS")
-			tlsConn := tls.Server(conn, s.tlsConfig)
-			if err := tlsConn.Handshake(); err != nil {
-				return
-			}
-			conn = tlsConn
-			reader = bufio.NewReader(conn)
-			writer = bufio.NewWriter(conn)
-			s.markTLS()
-		case strings.HasPrefix(upper, "AUTH PLAIN"):
-			s.mu.Lock()
-			s.authSeen = true
-			s.mu.Unlock()
-			writeLine("235 2.7.0 Authentication successful")
-		case strings.HasPrefix(upper, "MAIL FROM:"):
-			s.mu.Lock()
-			s.from = envelopeAddress(line)
-			s.mu.Unlock()
-			writeLine("250 OK")
-		case strings.HasPrefix(upper, "RCPT TO:"):
-			s.mu.Lock()
-			s.to = append(s.to, envelopeAddress(line))
-			s.mu.Unlock()
-			writeLine("250 OK")
-		case upper == "DATA":
-			data.Reset()
-			inData = true
-			writeLine("354 End data with <CR><LF>.<CR><LF>")
-		case upper == "QUIT":
-			writeLine("221 Bye")
-			return
-		default:
-			writeLine("250 OK")
-		}
-	}
-}
-
-func (s *recordingServer) markTLS() {
-	s.mu.Lock()
-	s.usedTLS = true
-	s.mu.Unlock()
-}
-
-func (s *recordingServer) snapshot() (from string, to []string, data []byte, usedTLS, authSeen bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.from, append([]string(nil), s.to...), append([]byte(nil), s.data...), s.usedTLS, s.authSeen
-}
-
-// envelopeAddress extracts the address from a MAIL FROM or RCPT TO command.
-func envelopeAddress(line string) string {
-	start := strings.Index(line, ":")
-	if start < 0 {
-		return ""
-	}
-	value := strings.TrimSpace(line[start+1:])
-	return strings.Trim(value, "<>")
-}
-
-// newSenderFor builds a sender whose TLS trust is the test server's own
-// certificate. The tlsConfig override is a test seam; production uses the
-// verified default.
-func newSenderFor(t *testing.T, settings config.Mail, pool *x509.CertPool) *Sender {
+// newSenderFor builds a sender from the settings and fails the test if the
+// section is rejected.
+func newSenderFor(t *testing.T, settings config.Mail) *Sender {
 	t.Helper()
 	sender, err := New(staticProvider{settings: settings})
 	if err != nil {
 		t.Fatalf("New: %v", err)
-	}
-	if pool != nil {
-		sender.tlsConfig = &tls.Config{RootCAs: pool, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12}
 	}
 	return sender
 }
@@ -261,148 +59,30 @@ func TestNewRequiresAProviderAndAValidSection(t *testing.T) {
 	}
 }
 
-// TestSendPlainText delivers a single text part over an unencrypted connection
-// and checks the envelope and the body the server received.
-func TestSendPlainText(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
+// TestSendRejectsMissingRecipientAndBody proves the sender refuses an envelope
+// with no recipient or a message with no body before it opens any connection:
+// the host is a dead port, so a dial attempt would fail differently.
+func TestSendRejectsMissingRecipientAndBody(t *testing.T) {
 	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
-	}, nil)
+		Host: "127.0.0.1", Port: 1, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
+	})
 
-	if err := sender.Send(context.Background(), Message{
-		To:      []string{"user@example.com"},
-		Subject: "Hello",
-		Text:    "plain body",
-	}); err != nil {
-		t.Fatalf("Send: %v", err)
+	if err := sender.Send(context.Background(), Message{Subject: "x", Text: "y"}); err == nil {
+		t.Fatal("expected an error for a message with no recipient")
 	}
-
-	from, to, data, usedTLS, _ := server.snapshot()
-	if from != "no-reply@example.com" {
-		t.Fatalf("envelope from = %q", from)
-	}
-	if len(to) != 1 || to[0] != "user@example.com" {
-		t.Fatalf("envelope to = %v", to)
-	}
-	if usedTLS {
-		t.Fatal("the plain policy used TLS")
-	}
-	text := string(data)
-	for _, want := range []string{"From: no-reply@example.com", "Subject: Hello", "Content-Type: text/plain; charset=utf-8", "plain body"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("message is missing %q:\n%s", want, text)
-		}
-	}
-}
-
-// TestSendMultipartTextHTML proves a message with both bodies is a
-// multipart/alternative whose parts carry the text and the HTML.
-func TestSendMultipartTextHTML(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
-	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
-	}, nil)
-
-	if err := sender.Send(context.Background(), Message{
-		To:      []string{"user@example.com"},
-		Subject: "Both",
-		Text:    "plain body",
-		HTML:    "<p>html body</p>",
-	}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	text := string(server.snapshotOrFail(t))
-	for _, want := range []string{
-		"Content-Type: multipart/alternative; boundary=",
-		"Content-Type: text/plain; charset=utf-8",
-		"plain body",
-		"Content-Type: text/html; charset=utf-8",
-		"<p>html body</p>",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("message is missing %q:\n%s", want, text)
-		}
-	}
-	textIndex := strings.Index(text, "plain body")
-	htmlIndex := strings.Index(text, "<p>html body</p>")
-	if textIndex < 0 || htmlIndex < 0 || textIndex > htmlIndex {
-		t.Errorf("the text part must precede the HTML part:\n%s", text)
-	}
-}
-
-// TestSendStartTLS proves the starttls policy requires and performs the upgrade
-// before the credentials and the message are sent.
-func TestSendStartTLS(t *testing.T) {
-	serverCert, pool := serverTLS(t)
-	server := &recordingServer{tlsConfig: serverCert, startTLS: true}
-	host, port := startServer(t, server)
-	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, Username: "app", Password: "secret", From: "no-reply@example.com",
-		TLS: config.MailTLSStartTLS, TimeoutSeconds: 5,
-	}, pool)
-
-	if err := sender.Send(context.Background(), Message{
-		To:      []string{"user@example.com"},
-		Subject: "Secured",
-		Text:    "body",
-	}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	_, _, data, usedTLS, authSeen := server.snapshot()
-	if !usedTLS {
-		t.Fatal("STARTTLS was not performed")
-	}
-	if !authSeen {
-		t.Fatal("the credentials were not sent")
-	}
-	if !strings.Contains(string(data), "body") {
-		t.Fatalf("the body was not delivered:\n%s", data)
-	}
-}
-
-// TestSendStartTLSUnavailable proves the policy is explicit: a server that does
-// not advertise STARTTLS fails the send rather than sending in the clear.
-func TestSendStartTLSUnavailable(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
-	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSStartTLS, TimeoutSeconds: 5,
-	}, nil)
-
-	if err := sender.Send(context.Background(), Message{To: []string{"user@example.com"}, Subject: "x", Text: "y"}); err == nil {
-		t.Fatal("expected an error when STARTTLS is required but unavailable")
-	}
-}
-
-// TestSendImplicitTLS proves the implicit policy wraps the connection before the
-// greeting and delivers the message.
-func TestSendImplicitTLS(t *testing.T) {
-	serverCert, pool := serverTLS(t)
-	server := &recordingServer{tlsConfig: serverCert}
-	host, port := startServer(t, server)
-	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSImplicit, TimeoutSeconds: 5,
-	}, pool)
-
-	if err := sender.Send(context.Background(), Message{To: []string{"user@example.com"}, Subject: "Implicit", Text: "body"}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if _, _, data, usedTLS, _ := server.snapshot(); !usedTLS || !strings.Contains(string(data), "body") {
-		t.Fatalf("implicit TLS delivery failed: usedTLS=%v data=%s", usedTLS, data)
+	if err := sender.Send(context.Background(), Message{To: []string{"user@example.com"}, Subject: "x"}); err == nil {
+		t.Fatal("expected an error for a message with no body")
 	}
 }
 
 // TestSendRejectsHeaderInjection proves a carriage return or a line feed in the
 // subject, the sender or a recipient fails the send instead of injecting a
-// header.
+// header. The host is a dead port, so only the pre-dial guard can produce these
+// errors.
 func TestSendRejectsHeaderInjection(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
 	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
-	}, nil)
+		Host: "127.0.0.1", Port: 1, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
+	})
 
 	cases := map[string]Message{
 		"subject":   {To: []string{"user@example.com"}, Subject: "ok\r\nBcc: victim@example.com", Text: "body"},
@@ -414,49 +94,152 @@ func TestSendRejectsHeaderInjection(t *testing.T) {
 			t.Errorf("%s: expected a header-injection error", name)
 		}
 	}
-	if from, _, _, _, _ := server.snapshot(); from != "" {
-		t.Fatalf("a rejected message reached the server: from = %q", from)
-	}
 }
 
-// TestSendRequiresRecipientAndBody proves the sender refuses an envelope with no
-// recipient or a message with no body.
-func TestSendRequiresRecipientAndBody(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
+// TestSendDeliversOverLocalSMTP proves a real send end to end through the
+// library against an in-process server, checking the envelope and the body.
+func TestSendDeliversOverLocalSMTP(t *testing.T) {
+	host, port, server := startSMTPServer(t)
 	sender := newSenderFor(t, config.Mail{
 		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
-	}, nil)
+	})
 
-	if err := sender.Send(context.Background(), Message{Subject: "x", Text: "y"}); err == nil {
-		t.Fatal("expected an error for a message with no recipient")
+	if err := sender.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Hello",
+		Text:    "plain body",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
-	if err := sender.Send(context.Background(), Message{To: []string{"user@example.com"}, Subject: "x"}); err == nil {
-		t.Fatal("expected an error for a message with no body")
+
+	from, to, data := server.snapshot()
+	if from != "no-reply@example.com" {
+		t.Fatalf("envelope from = %q", from)
+	}
+	if len(to) != 1 || to[0] != "user@example.com" {
+		t.Fatalf("envelope to = %v", to)
+	}
+	text := string(data)
+	for _, want := range []string{"Subject: Hello", "plain body"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("message is missing %q:\n%s", want, text)
+		}
 	}
 }
 
-// TestSendHonorsContext proves a canceled context aborts the send before it
-// reaches the server.
-func TestSendHonorsContext(t *testing.T) {
-	server := &recordingServer{}
-	host, port := startServer(t, server)
-	sender := newSenderFor(t, config.Mail{
-		Host: host, Port: port, From: "no-reply@example.com", TLS: config.MailTLSNone, TimeoutSeconds: 5,
-	}, nil)
+// smtpServer is a minimal but real SMTP server: it speaks the greeting, EHLO,
+// NOOP, MAIL, RCPT, DATA, RSET and QUIT commands go-mail uses, and records the
+// envelope and the body it saw.
+type smtpServer struct {
+	listener net.Listener
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := sender.Send(ctx, Message{To: []string{"user@example.com"}, Subject: "x", Text: "y"}); err == nil {
-		t.Fatal("expected a canceled context to abort the send")
-	}
+	mu   sync.Mutex
+	from string
+	to   []string
+	data []byte
 }
 
-func (s *recordingServer) snapshotOrFail(t *testing.T) []byte {
+// startSMTPServer starts the server on loopback and returns its host, port and
+// the recorder. It stops on test cleanup.
+func startSMTPServer(t *testing.T) (string, int, *smtpServer) {
 	t.Helper()
-	_, _, data, _, _ := s.snapshot()
-	if len(data) == 0 {
-		t.Fatal("the server received no message")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
-	return data
+	server := &smtpServer{listener: listener}
+	go server.serve()
+	t.Cleanup(func() { _ = listener.Close() })
+	addr := listener.Addr().(*net.TCPAddr)
+	return addr.IP.String(), addr.Port, server
+}
+
+func (s *smtpServer) serve() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *smtpServer) handle(conn net.Conn) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(line string) {
+		_, _ = writer.WriteString(line + "\r\n")
+		_ = writer.Flush()
+	}
+	writeLine("220 test ESMTP")
+
+	inData := false
+	var body strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if inData {
+			if line == "." {
+				inData = false
+				s.mu.Lock()
+				s.data = []byte(body.String())
+				s.mu.Unlock()
+				writeLine("250 OK: queued")
+				continue
+			}
+			if strings.HasPrefix(line, "..") {
+				line = line[1:]
+			}
+			body.WriteString(line + "\r\n")
+			continue
+		}
+		upper := strings.ToUpper(line)
+		switch {
+		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+			writeLine("250 test")
+		case upper == "NOOP":
+			writeLine("250 OK")
+		case strings.HasPrefix(upper, "MAIL FROM:"):
+			s.mu.Lock()
+			s.from = envelopeAddress(line)
+			s.mu.Unlock()
+			writeLine("250 OK")
+		case strings.HasPrefix(upper, "RCPT TO:"):
+			s.mu.Lock()
+			s.to = append(s.to, envelopeAddress(line))
+			s.mu.Unlock()
+			writeLine("250 OK")
+		case upper == "DATA":
+			body.Reset()
+			inData = true
+			writeLine("354 End data with <CR><LF>.<CR><LF>")
+		case upper == "RSET":
+			writeLine("250 OK")
+		case upper == "QUIT":
+			writeLine("221 Bye")
+			return
+		default:
+			writeLine("250 OK")
+		}
+	}
+}
+
+func (s *smtpServer) snapshot() (from string, to []string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.from, append([]string(nil), s.to...), append([]byte(nil), s.data...)
+}
+
+// envelopeAddress extracts the address from a MAIL FROM or RCPT TO command.
+func envelopeAddress(line string) string {
+	start := strings.Index(line, ":")
+	if start < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(line[start+1:])
+	return strings.Trim(value, "<>")
 }

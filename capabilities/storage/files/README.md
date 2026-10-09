@@ -59,12 +59,15 @@ The configuration lives in `internal/config` (`config.Storage`) and is read from
 | `bucket` | none | required; must already exist |
 | `access_key_id` / `secret_access_key` | none | required; held as `config.Secret` |
 | `path_style` | `false` | set `true` for most S3-compatible servers |
-| `tls` | `true` | a scheme in `endpoint` wins; local HTTP servers set `false` |
+| `tls` | `true` | a scheme-less `endpoint` follows this; an `http://` endpoint with credentials requires an explicit `false` |
 
 The access key and secret are `config.Secret`, which redacts itself in `fmt`,
 `log/slog`, JSON and YAML, so a credential cannot reach a log record by
 accident. An endpoint without a scheme is given `https`, or `http` when `tls` is
-explicitly disabled.
+explicitly disabled. An endpoint that names `http://` explicitly is rejected
+when credentials are set and `tls` is not explicitly `false`, so the secure
+default cannot silently send a credential in the clear; a local plaintext server
+states `tls: false`.
 
 ## The provider seam
 
@@ -97,10 +100,10 @@ lifecycle releases the store's idle connections when it was constructed.
 
 To use the store, make a provider the graph already consumes depend on
 `*objectstore.Store`. `storage_provider.go` is written once and never
-regenerated, so those edits survive every later `weld add`. The storage
-capability's `INTEGRATION.md` in the weld-template repository lists the exact
-Loom wiring seams, including the small common-file edits loom needs for the
-install-order edge case.
+regenerated, so those edits survive every later `weld add`. Whichever of
+`storage` and `loom` is installed second writes the file (both capabilities carry
+the same template, each guarded by the other), so the install order does not
+matter and `di.go` is never hand-edited.
 
 ## Tests
 

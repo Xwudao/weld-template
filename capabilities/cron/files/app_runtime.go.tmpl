@@ -1,0 +1,70 @@
+package app
+
+// The cron capability attaches the scheduler to the long-running serve command
+// through the shared config runtime seam (internal/config/runtime.go). This file
+// is stable: `weld add cron` writes it once and never regenerates it, so edits
+// survive every later `weld add`.
+//
+// The scheduler follows serve, never a short command: this init only registers
+// the runtime factory, and the factory is built and started only by
+// config.StartRuntimes, which runServe calls after binding its socket. help,
+// version and an unknown command never start anything.
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+
+	"__module__/internal/config"
+	"__module__/internal/cron"
+)
+
+func init() {
+	config.RegisterRuntime(newCronRuntime)
+}
+
+// newCronRuntime builds the scheduler runtime a long-running command starts. It
+// satisfies config.RuntimeFactory.
+func newCronRuntime(cfg *config.Config, logger *slog.Logger) config.Runtime {
+	return &cronRuntime{cfg: cfg, logger: logger}
+}
+
+// cronRuntime is the config.Runtime that owns the scheduler. It is constructed
+// but starts nothing until Start, so registering it is free.
+type cronRuntime struct {
+	cfg       *config.Config
+	logger    *slog.Logger
+	scheduler *cron.Scheduler
+}
+
+// Start resolves the configured timezone, builds the scheduler, registers the
+// application's jobs and starts it. It returns an error rather than starting
+// into an invalid state, so serve fails loudly on a bad timezone or a bad job
+// registration.
+func (r *cronRuntime) Start(ctx context.Context) error {
+	location, err := r.cfg.Cron.Location()
+	if err != nil {
+		return err
+	}
+	scheduler := cron.New(r.logger, cron.WithLocation(location))
+	if err := cron.Register(scheduler); err != nil {
+		return err
+	}
+	scheduler.Start(ctx)
+	r.scheduler = scheduler
+	r.logger.Info("__name__ cron scheduler started")
+	return nil
+}
+
+// Stop stops the scheduler within ctx's deadline. Stop cancels the running jobs'
+// context and waits for them, so shutdown stays bounded.
+func (r *cronRuntime) Stop(ctx context.Context) error {
+	if r.scheduler == nil {
+		return nil
+	}
+	if err := r.scheduler.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	r.logger.Info("__name__ cron scheduler stopped")
+	return nil
+}

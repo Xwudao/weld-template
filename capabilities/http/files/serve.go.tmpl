@@ -1,15 +1,25 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"__module__/internal/config"
 	httpserver "__module__/internal/httpserver"
 	"__module__/internal/logging"
 )
+
+// serveShutdownTimeout bounds how long a signaled serve waits for the
+// registered long-running runtimes (the cron scheduler among them) and then for
+// the HTTP server to stop, so teardown cannot hang.
+const serveShutdownTimeout = 10 * time.Second
 
 func init() {
 	// weld:serve:begin
@@ -26,8 +36,14 @@ func init() {
 //
 // The listen address comes from the shared config loader (config.yml, then the
 // environment), and an explicit --addr flag wins over both. It builds the logger
-// with the same base constructor the rest of the process uses, then injects it
-// into the server so the listening record goes through the one logging protocol.
+// with the same base constructor the rest of the process uses, so the listening
+// and shutdown records go through the one logging protocol.
+//
+// It is the command that follows a long-running process lifecycle: a signal
+// cancels the context, the registered runtimes (such as the cron scheduler)
+// start after the socket is bound and stop within serveShutdownTimeout, and a
+// serve or runtime stop failure is returned rather than swallowed. help, version
+// and every short command never reach this code.
 func runServe(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -55,5 +71,61 @@ func runServe(args []string) error {
 		return errors.New("serve: listen address must not be blank")
 	}
 	logger := logging.New(os.Stderr, logging.TextFormat, nil)
-	return httpserver.Serve(logger, listenAddr, httpserver.Handler())
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return serveWithContext(ctx, cfg, listenAddr, logger)
+}
+
+// serveWithContext runs the serve lifecycle against ctx: bind the socket, record
+// the listening line, start the registered runtimes, serve until ctx is canceled
+// or the server fails, then stop the runtimes before shutting the HTTP server
+// down.
+//
+// The order matters and mirrors the Loom graph: the runtimes stop first while
+// the server is still up, and the HTTP server shuts down last. Every error is
+// joined rather than logged and dropped, so a failed runtime stop makes serve
+// fail. It takes ctx as a parameter so a test can drive the lifecycle without a
+// signal.
+func serveWithContext(ctx context.Context, cfg *config.Config, listenAddr string, logger *slog.Logger) error {
+	// Bind the socket before starting any long-running runtime, so a failed bind
+	// starts nothing and is reported synchronously.
+	listener, err := httpserver.Listen(listenAddr)
+	if err != nil {
+		return err
+	}
+	// Record the listening line after the socket is bound and before the runtimes
+	// start, so a reader can tell the server was up first.
+	logger.Info("__name__ listening", "addr", httpserver.DisplayAddr(listenAddr))
+
+	stopRuntimes, err := config.StartRuntimes(ctx, cfg, logger)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	serveFailed := make(chan error, 1)
+	go func() { serveFailed <- httpserver.Serve(serveCtx, listenAddr, listener, httpserver.Handler()) }()
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case serveErr = <-serveFailed:
+	}
+
+	// Stop the runtimes before the HTTP server: work that depends on the server
+	// still being reachable is torn down while it is.
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), serveShutdownTimeout)
+	stopErr := stopRuntimes(stopCtx)
+	cancelStop()
+
+	logger.Info("__name__ shutting down")
+	cancelServe()
+	if serveErr == nil {
+		serveErr = <-serveFailed
+	}
+	return errors.Join(serveErr, stopErr)
 }

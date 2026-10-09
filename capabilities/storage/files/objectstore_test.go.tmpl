@@ -85,12 +85,42 @@ func newTestStore(t *testing.T) (*Store, *fakeS3) {
 		AccessKeyID:     "test-access-key",
 		SecretAccessKey: "test-secret-key",
 		PathStyle:       true,
+		TLS:             boolPtr(false),
 	}}
 	store, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	return store, fake
+}
+
+// newTestStoreTLS starts the protocol adapter behind TLS and builds a Store that
+// trusts its certificate. It is the secure endpoint a production deployment
+// uses, and it matters here: SigV4 signs the payload hash over plain HTTP, which
+// requires a seekable body, while over TLS it uses UNSIGNED-PAYLOAD and can
+// stream a non-seekable body.
+func newTestStoreTLS(t *testing.T) (*Store, *fakeS3) {
+	t.Helper()
+	fake := &fakeS3{}
+	server := httptest.NewTLSServer(fake)
+	t.Cleanup(server.Close)
+	cfg := &config.Config{Storage: config.Storage{
+		Endpoint:        server.URL,
+		Region:          "us-east-1",
+		Bucket:          testBucket,
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+		PathStyle:       true,
+	}}
+	store, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	// The test server's own client trusts its self-signed certificate; the SDK
+	// uses the same *http.Client the Store built.
+	store.httpClient.Transport = server.Client().Transport
 	return store, fake
 }
 
@@ -307,6 +337,44 @@ func TestUploadRejectsNilBody(t *testing.T) {
 	}
 }
 
+// countingReader is a non-seekable io.Reader: it implements only Read, so the
+// upload path must stream it rather than demanding a seekable body.
+type countingReader struct {
+	r    io.Reader
+	read int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += n
+	return n, err
+}
+
+// TestUploadStreamsNonSeekableBody proves Upload accepts a reader that cannot
+// seek and consumes it exactly once, so a pipe or a network stream uploads
+// without being buffered into memory first.
+func TestUploadStreamsNonSeekableBody(t *testing.T) {
+	store, fake := newTestStoreTLS(t)
+	payload := strings.Repeat("streamed-chunk-", 512)
+	reader := &countingReader{r: strings.NewReader(payload)}
+
+	etag, err := store.Upload(context.Background(), testKey, reader)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if etag == "" {
+		t.Fatal("Upload returned an empty ETag")
+	}
+	if body, ok := fake.get(testKey); !ok || string(body) != payload {
+		t.Fatalf("the server stored %d bytes, want %d", len(body), len(payload))
+	}
+	if reader.read != len(payload) {
+		t.Fatalf("the body was read %d times, want %d", reader.read, len(payload))
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
 // staticProvider is a Provider backed by fixed settings. It proves the Store can
 // be built from the provider seam that a future DB-backed site-config runtime
 // configuration implements.
@@ -332,6 +400,7 @@ func TestNewWithProvider(t *testing.T) {
 		AccessKeyID:     "key",
 		SecretAccessKey: "secret",
 		PathStyle:       true,
+		TLS:             boolPtr(false),
 	}
 	store, err := NewWithProvider(context.Background(), staticProvider{settings: settings})
 	if err != nil {

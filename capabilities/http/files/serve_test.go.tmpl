@@ -1,8 +1,14 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"__module__/internal/config"
+	"__module__/internal/logging"
 )
 
 func TestServeCommandIsRegistered(t *testing.T) {
@@ -24,5 +30,35 @@ func TestRunServeRejectsUnknownFlag(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "flag") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestServeWithContextBindsLogsAndStops proves the lifecycle helper binds the
+// socket, records the listening and shutdown lines, and returns once ctx is
+// canceled, so runServe is only the signal wrapper around it.
+func TestServeWithContextBindsLogsAndStops(t *testing.T) {
+	var records bytes.Buffer
+	logger := logging.New(&records, logging.TextFormat, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveWithContext(ctx, &config.Config{}, "127.0.0.1:0", logger) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveWithContext: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveWithContext did not return after the context was canceled")
+	}
+	// Every record is written before serveWithContext returns, so reading the
+	// buffer here does not race the goroutine.
+	out := records.String()
+	for _, want := range []string{"listening", "shutting down"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("serveWithContext did not log %q:\n%s", want, out)
+		}
 	}
 }

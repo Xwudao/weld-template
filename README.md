@@ -54,7 +54,22 @@ capabilities/
     capability.json
     files/         internal/di/di.go.tmpl (capability-aware graph source),
                    internal/app/serve_loom.go, tools/loom (nested module pinning
-                   the Loom generator), README
+                   the Loom generator), stable provider seams, README
+  cron/            kind: add    -> in-process scheduler, requires base + config
+    capability.json
+    files/         internal/cron (registry + stable register.go job seam),
+                   internal/app/cron.go (the serve runtime),
+                   internal/config/cron.go, snippets, README
+  mail/            kind: add    -> opt-in SMTP sender, requires base + config
+    capability.json
+    files/         internal/mailsender (per-Send SMTP client),
+                   internal/config/mail.go,
+                   internal/di/mail_provider.go (stable Loom seam), README
+  storage/         kind: add    -> opt-in S3 client, requires base + config
+    capability.json
+    files/         internal/objectstore (streaming S3-compatible client),
+                   internal/config/storage.go,
+                   internal/di/storage_provider.go (stable Loom seam), README
 ```
 
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
@@ -100,14 +115,40 @@ its lifecycle. Nothing in the generated application imports the client, so an
 ordinary build, test or serve needs no Redis server; `weld add redis` never wires
 Redis into a service.
 
-`loom` requires `http` and is **opt-in**: `web`, `api` and `db` never install
-it. It renders `internal/di/di.go` against the installed capability set and
-generates `internal/di/loom_gen.go` with the real pinned generator, so the graph
-follows whatever of `db` and `api` is installed, in either order. It is the only
-capability whose payload is capability aware; every other capability stays
-Loom-free. The graph also provides the `*slog.Logger` (via `NewLogger`) that the
-managed HTTP server uses to record startup, a serve failure and a graceful
-shutdown, so the logger is injected rather than reached for through a global.
+`loom` requires `http` and is **opt-in**: `web`, `api`, `db`, `redis`, `mail`,
+`storage` and `cron` never install it. It renders `internal/di/di.go` against the
+installed capability set and generates `internal/di/loom_gen.go` with the real
+pinned generator, so the graph follows whatever of `db`, `api`, `redis`, `mail`,
+`storage` and `cron` is installed, in either order. It is the only capability
+whose payload is capability aware; every other capability stays Loom-free. The
+graph also provides the `*slog.Logger` (via `NewLogger`) that the managed HTTP
+server uses to record startup, a serve failure and a graceful shutdown, so the
+logger is injected rather than reached for through a global. The `db`, `redis`,
+`mail` and `storage` bindings are declared but pruned until a provider depends
+on them; `cron` is different — the graph root consumes the scheduler, so the
+scheduler is constructed and its lifecycle hooks run with the server (the socket
+is bound before it starts and it stops before the server).
+
+`cron` requires `base` and `config` and is opt-in. It ships an in-process
+scheduler (`internal/cron`) with a stable, user-editable registration file
+(`internal/cron/register.go`) that declares no jobs, so installing the capability
+schedules nothing. `internal/app/cron.go` registers a runtime with the shared
+`config` runtime seam, and the `serve` command starts that runtime after binding
+its socket and stops it on shutdown; `help`, `version` and every short command
+never start it. The plain `serve` command serves under a signal-canceled context
+and shuts the scheduler and HTTP server down within a bounded timeout; with Loom
+installed, the stable `internal/di/cron_provider.go` seam builds the scheduler
+and registers its hooks. The scheduler takes no database or Redis lock.
+
+`mail` and `storage` likewise require only `base` and `config`. `mail` ships an
+SMTP sender (`internal/mailsender`) with typed, secret-redacted configuration and
+an explicit TLS policy; `storage` ships a streaming S3-compatible client
+(`internal/objectstore`) that never creates the bucket. Neither is imported by
+the generated application, and each declares a stable Loom provider seam
+(`internal/di/mail_provider.go`, `internal/di/storage_provider.go`) that the
+graph declares but prunes until a provider depends on it. Both capabilities and
+`loom` carry the same provider template guarded by the other, so whichever is
+installed second writes the seam and the install order does not matter.
 
 ## Configuration
 
@@ -147,6 +188,14 @@ only place the database password is read. The database section is validated only
 where the database is actually used (`ValidateDatabase`), so an http-only project
 never needs a database setting, and no credential is ever defaulted: host and
 port have defaults, but the user, password and name do not.
+
+`internal/config/runtime.go` is the shared long-running-runtime seam. A
+capability that must start and stop work with `serve` registers a `RuntimeFactory`
+from an init function; the `serve` command builds and starts the factories after
+binding its socket and stops them on shutdown, and short commands never do. This
+is how `cron` follows `serve` without the serve command knowing cron exists, and
+it works in either add order because `config` is installed by every capability
+that runs a long-lived process.
 
 `config.yml` is generated locally and listed in `.gitignore`;
 `config.example.yml` is committed and documents the shape. The file carries a
@@ -330,5 +379,6 @@ targets are guarded (no `psql`, explicit `DATABASE_URL`, one-step confirmed
 down) and the integration test isolates itself in its own schema with no global
 `DROP TABLE`. For the logging milestone it proves `base` ships the `log/slog`
 factory and `main` logs a failed command through it (no `fmt.Fprintln`, no
-process default logger), that `httpserver.Serve` takes an injected logger, and
-that the Loom graph provides and injects one.
+process default logger), that the `serve` command records the listening and
+shutdown lines through the injected logger while `httpserver.Serve` itself never
+writes to the process streams, and that the Loom graph provides and injects one.

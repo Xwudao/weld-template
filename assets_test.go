@@ -575,31 +575,29 @@ func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
 	}
 }
 
-// TestHTTPCapabilityInjectsLogger guards the http logging wiring: Serve takes an
-// injected *slog.Logger and no longer writes the listening line to stderr
-// directly.
+// TestHTTPCapabilityInjectsLogger guards the http logging wiring: the serve
+// command builds the injected logger from the base factory and records the
+// listening and shutdown lines through it, while server.go never writes to the
+// process streams directly.
 func TestHTTPCapabilityInjectsLogger(t *testing.T) {
+	serveGo, err := fs.ReadFile(FS(), "capabilities/http/files/serve.go.tmpl")
+	if err != nil {
+		t.Fatalf("read serve.go: %v", err)
+	}
+	serveText := string(serveGo)
+	for _, want := range []string{"logging.New", "logger.Info", "listening"} {
+		if !strings.Contains(serveText, want) {
+			t.Errorf("serve.go is missing %q:\n%s", want, serveText)
+		}
+	}
+
 	serverGo, err := fs.ReadFile(FS(), "capabilities/http/files/server.go.tmpl")
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
 	serverText := string(serverGo)
-	if !strings.Contains(serverText, "logger *slog.Logger") {
-		t.Errorf("Serve does not accept an injected logger:\n%s", serverText)
-	}
-	if !strings.Contains(serverText, "logger.Info") {
-		t.Errorf("Serve does not log through the injected logger:\n%s", serverText)
-	}
 	if strings.Contains(serverText, "os.Stderr") || strings.Contains(serverText, "fmt.Fprintf") {
 		t.Errorf("server.go still writes to the process streams directly:\n%s", serverText)
-	}
-
-	serveGo, err := fs.ReadFile(FS(), "capabilities/http/files/serve.go.tmpl")
-	if err != nil {
-		t.Fatalf("read serve.go: %v", err)
-	}
-	if !strings.Contains(string(serveGo), "logging.New") {
-		t.Errorf("serve.go does not build the logger from the base factory:\n%s", serveGo)
 	}
 }
 
@@ -932,6 +930,301 @@ func TestRedisProviderSeamTemplatesMatch(t *testing.T) {
 	for _, want := range []string{"func NewRedisClient(cfg *config.Config) (*redis.Client, loom.Cleanup, error)", "__module__/internal/redisclient"} {
 		if !strings.Contains(string(redisTemplate), want) {
 			t.Errorf("redis_provider.go template is missing %q:\n%s", want, redisTemplate)
+		}
+	}
+}
+
+// TestCronCapabilityIsConfigOnly guards the cron capability's contract: it needs
+// only base and config, ships the scheduler library plus a stable registration
+// file and the serve runtime, and declares its Loom provider seam guarded on
+// loom.
+func TestCronCapabilityIsConfigOnly(t *testing.T) {
+	d := readDescriptor(t, "cron")
+	if d.Kind != "add" {
+		t.Fatalf("cron kind = %q, want add", d.Kind)
+	}
+	if strings.Join(d.Requires, ",") != "base,config" {
+		t.Fatalf("cron requires = %v, want [base config]", d.Requires)
+	}
+	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+		for _, required := range d.Requires {
+			if required == forbidden {
+				t.Errorf("cron requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]string{}
+	for _, file := range d.Files {
+		paths[file.Path] = file.Source
+	}
+	for _, want := range []string{
+		"internal/cron/cron.go",
+		"internal/cron/register.go",
+		"internal/cron/README.md",
+		"internal/config/cron.go",
+		"internal/config/cron_test.go",
+		"internal/app/cron.go",
+		"internal/app/cron_test.go",
+		"internal/di/cron_provider.go",
+	} {
+		if _, ok := paths[want]; !ok {
+			t.Errorf("cron does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path == "internal/di/cron_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+		}
+	}
+	if !providerSeam {
+		t.Errorf("cron cron_provider.go is not guarded by when: [loom]: %+v", d.Files)
+	}
+	markers := map[string]bool{}
+	for _, patch := range d.Patches {
+		switch {
+		case patch.Path == "go.mod" && patch.Marker == "deps":
+			markers["go.mod|deps"] = true
+		case patch.Path == "config.yml" && patch.Marker == "config":
+			if patch.Bootstrap != "config.example.yml" {
+				t.Errorf("cron config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+			}
+			markers["config.yml|config"] = true
+		case patch.Path == "config.example.yml" && patch.Marker == "config":
+			markers["config.example.yml|config"] = true
+		case patch.Path == "internal/config/config.go":
+			markers["config.go|"+patch.Marker] = true
+		}
+	}
+	for _, want := range []string{
+		"go.mod|deps",
+		"config.yml|config",
+		"config.example.yml|config",
+		"config.go|configfields",
+		"config.go|configenv",
+		"config.go|configdefaults",
+	} {
+		if !markers[want] {
+			t.Errorf("cron does not patch %s: %+v", want, d.Patches)
+		}
+	}
+
+	// The scheduler follows serve through the shared config runtime seam, and it
+	// does not schedule anything by itself.
+	appRuntime, err := fs.ReadFile(FS(), "capabilities/cron/files/app_runtime.go.tmpl")
+	if err != nil {
+		t.Fatalf("read cron app runtime: %v", err)
+	}
+	appText := string(appRuntime)
+	for _, want := range []string{"config.RegisterRuntime", "cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop"} {
+		if !strings.Contains(appText, want) {
+			t.Errorf("cron app runtime is missing %q:\n%s", want, appText)
+		}
+	}
+	register, err := fs.ReadFile(FS(), "capabilities/cron/files/register.go.tmpl")
+	if err != nil {
+		t.Fatalf("read cron register: %v", err)
+	}
+	if !strings.Contains(string(register), "func Register(s *Scheduler) error") {
+		t.Errorf("cron register file does not expose Register:\n%s", register)
+	}
+	if !strings.Contains(string(register), "return nil") {
+		t.Errorf("cron register file registers jobs by default:\n%s", register)
+	}
+
+	// Loom declares the provider and the graph root consumes the scheduler, so it
+	// is not pruned.
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom di template: %v", err)
+	}
+	for _, want := range []string{`{{- if .Caps.Has "cron"}}`, "loom.Provide(NewScheduler)", "Scheduler *cron.Scheduler"} {
+		if !strings.Contains(string(graph), want) {
+			t.Errorf("loom di template is missing %q", want)
+		}
+	}
+	if strings.Contains(string(graph), "func NewScheduler") {
+		t.Error("loom di template defines NewScheduler; the provider must live in cron_provider.go")
+	}
+}
+
+// TestCronProviderSeamTemplatesMatch proves the cron and loom copies of the
+// provider seam are byte-identical, so the install order cannot change the
+// generated file.
+func TestCronProviderSeamTemplatesMatch(t *testing.T) {
+	cronTemplate, err := fs.ReadFile(FS(), "capabilities/cron/files/cron_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read cron provider template: %v", err)
+	}
+	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/cron_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom cron provider template: %v", err)
+	}
+	if string(cronTemplate) != string(loomTemplate) {
+		t.Error("the cron and loom cron_provider.go templates differ; the install order would change the generated file")
+	}
+	for _, want := range []string{
+		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server) (*cron.Scheduler, error)",
+		"__module__/internal/cron",
+		"loom.Hook",
+	} {
+		if !strings.Contains(string(cronTemplate), want) {
+			t.Errorf("cron_provider.go template is missing %q:\n%s", want, cronTemplate)
+		}
+	}
+}
+
+// TestMailCapabilityIsConfigOnly guards the mail capability's contract: it needs
+// only base and config, ships the typed config extension and the sender package,
+// and declares its Loom provider seam guarded on loom.
+func TestMailCapabilityIsConfigOnly(t *testing.T) {
+	d := readDescriptor(t, "mail")
+	if d.Kind != "add" {
+		t.Fatalf("mail kind = %q, want add", d.Kind)
+	}
+	if strings.Join(d.Requires, ",") != "base,config" {
+		t.Fatalf("mail requires = %v, want [base config]", d.Requires)
+	}
+	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+		for _, required := range d.Requires {
+			if required == forbidden {
+				t.Errorf("mail requires %q", forbidden)
+			}
+		}
+	}
+	paths := map[string]bool{}
+	for _, file := range d.Files {
+		paths[file.Path] = true
+	}
+	for _, want := range []string{
+		"internal/config/mail.go",
+		"internal/config/mail_test.go",
+		"internal/mailsender/mailsender.go",
+		"internal/mailsender/mailsender_test.go",
+		"internal/mailsender/README.md",
+		"internal/di/mail_provider.go",
+	} {
+		if !paths[want] {
+			t.Errorf("mail capability does not ship %s", want)
+		}
+	}
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path == "internal/di/mail_provider.go" {
+			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+		}
+	}
+	if !providerSeam {
+		t.Errorf("mail mail_provider.go is not guarded by when: [loom]: %+v", d.Files)
+	}
+	markers := map[string]bool{}
+	for _, patch := range d.Patches {
+		if patch.Path == "config.yml" && patch.Marker == "config" && patch.Bootstrap != "config.example.yml" {
+			t.Errorf("mail config.yml patch bootstrap = %q, want config.example.yml", patch.Bootstrap)
+		}
+		if patch.Path == "internal/config/config.go" {
+			markers[patch.Marker] = true
+		}
+	}
+	for _, want := range []string{"configfields", "configenv", "configdefaults"} {
+		if !markers[want] {
+			t.Errorf("mail does not patch the config.go %s extension point: %+v", want, d.Patches)
+		}
+	}
+
+	// Loom declares the provider; the graph prunes it until a consumer asks.
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom di template: %v", err)
+	}
+	if !strings.Contains(string(graph), "loom.Provide(NewMailSender)") {
+		t.Error("loom di template does not declare NewMailSender")
+	}
+	if strings.Contains(string(graph), "func NewMailSender") {
+		t.Error("loom di template defines NewMailSender; the provider must live in mail_provider.go")
+	}
+}
+
+// TestMailProviderSeamTemplatesMatch proves the mail and loom copies of the
+// provider seam are byte-identical.
+func TestMailProviderSeamTemplatesMatch(t *testing.T) {
+	mailTemplate, err := fs.ReadFile(FS(), "capabilities/mail/files/mail_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read mail provider template: %v", err)
+	}
+	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/mail_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom mail provider template: %v", err)
+	}
+	if string(mailTemplate) != string(loomTemplate) {
+		t.Error("the mail and loom mail_provider.go templates differ; the install order would change the generated file")
+	}
+}
+
+// TestStorageProviderSeamTemplatesMatch proves the storage and loom copies of the
+// provider seam are byte-identical.
+func TestStorageProviderSeamTemplatesMatch(t *testing.T) {
+	storageTemplate, err := fs.ReadFile(FS(), "capabilities/storage/files/storage_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read storage provider template: %v", err)
+	}
+	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/storage_provider.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom storage provider template: %v", err)
+	}
+	if string(storageTemplate) != string(loomTemplate) {
+		t.Error("the storage and loom storage_provider.go templates differ; the install order would change the generated file")
+	}
+}
+
+// TestLoomDeclaresAuxiliaryProviders pins the loom-side declarations that make
+// the mail, storage and cron integrations install-order independent: the graph
+// declares the pruned bindings and the served scheduler, and the mirror files
+// are declared guarded by the capability they mirror.
+func TestLoomDeclaresAuxiliaryProviders(t *testing.T) {
+	d := readDescriptor(t, "loom")
+	want := map[string]string{"mail": "", "storage": "", "cron": ""}
+	for _, file := range d.Files {
+		switch file.Path {
+		case "internal/di/mail_provider.go":
+			want["mail"] = file.Source
+		case "internal/di/storage_provider.go":
+			want["storage"] = file.Source
+		case "internal/di/cron_provider.go":
+			want["cron"] = file.Source
+		}
+		for _, name := range []string{"mail", "storage", "cron"} {
+			if file.Path == "internal/di/"+name+"_provider.go" {
+				if len(file.When) != 1 || file.When[0] != name {
+					t.Errorf("loom %s_provider.go is not guarded by when: [%s]: %+v", name, name, file)
+				}
+			}
+		}
+	}
+	for name, source := range want {
+		if source == "" {
+			t.Errorf("loom does not declare the %s provider mirror", name)
+		}
+	}
+}
+
+// TestConfigCapabilityShipsRuntimeSeam guards the shared long-running runtime
+// seam the cron scheduler follows serve through: config ships it, so a
+// capability can register a runtime without the serve command knowing it.
+func TestConfigCapabilityShipsRuntimeSeam(t *testing.T) {
+	raw, err := fs.ReadFile(FS(), "capabilities/config/files/runtime.go.tmpl")
+	if err != nil {
+		t.Fatalf("read config runtime seam: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"type Runtime interface",
+		"type RuntimeFactory func",
+		"func RegisterRuntime(",
+		"func StartRuntimes(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("config runtime seam is missing %q", want)
 		}
 	}
 }

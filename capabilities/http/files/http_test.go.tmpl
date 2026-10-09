@@ -1,12 +1,11 @@
 package httpserver
 
 import (
-	"bytes"
-	"log/slog"
+	"context"
 	nethttp "net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewHandlerComposesInjectedRoutes(t *testing.T) {
@@ -43,20 +42,53 @@ func TestNewServerConfiguresWithoutListening(t *testing.T) {
 	}
 }
 
-// TestServeReportsOccupiedPortWithoutListening covers the ordering regression:
-// Serve must bind the socket before it records the listening line, so an
-// address already in use fails without printing a false success. The occupying
-// server is closed by the test, so no socket is leaked.
-func TestServeReportsOccupiedPortWithoutListening(t *testing.T) {
+// TestListenReportsOccupiedPort covers the ordering regression: the socket is
+// bound synchronously, so an address already in use fails before any listening
+// line is printed. The occupying server is closed by the test, so no socket is
+// leaked.
+func TestListenReportsOccupiedPort(t *testing.T) {
 	occupied := httptest.NewServer(NewHandler())
 	defer occupied.Close()
 
-	var records bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&records, nil))
-	if err := Serve(logger, occupied.Listener.Addr().String(), NewHandler()); err == nil {
-		t.Fatal("Serve succeeded on an occupied port")
+	listener, err := Listen(occupied.Listener.Addr().String())
+	if err == nil {
+		listener.Close()
+		t.Fatal("Listen succeeded on an occupied port")
 	}
-	if strings.Contains(records.String(), "listening") {
-		t.Fatalf("Serve logged a listening line before binding a socket:\n%s", records.String())
+}
+
+// TestDisplayAddrMakesBarePortsClickable pins the address formatting the
+// listening record uses.
+func TestDisplayAddrMakesBarePortsClickable(t *testing.T) {
+	if got := DisplayAddr(":8080"); got != "localhost:8080" {
+		t.Fatalf("DisplayAddr(\":8080\") = %q", got)
+	}
+	if got := DisplayAddr("127.0.0.1:8080"); got != "127.0.0.1:8080" {
+		t.Fatalf("DisplayAddr kept a bare address unchanged: %q", got)
+	}
+}
+
+// TestServeShutsDownGracefullyOnCancel proves a canceled context stops the
+// server within the shutdown timeout and returns no error, which is what a
+// signal-driven serve relies on.
+func TestServeShutsDownGracefullyOnCancel(t *testing.T) {
+	listener, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := listener.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, addr, listener, NewHandler()) }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v after a graceful shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the context was canceled")
 	}
 }

@@ -64,9 +64,12 @@ func (s Storage) UseTLS() bool {
 // EndpointURL returns the S3 endpoint URL.
 //
 // An endpoint that already carries a scheme is used verbatim, minus a trailing
-// slash. A scheme-less endpoint is given https, or http when TLS is explicitly
-// disabled. An empty endpoint returns an empty string, which leaves the AWS SDK
-// on Amazon S3's default endpoint.
+// slash, except that an explicit plaintext http scheme with credentials is
+// rejected unless TLS is explicitly disabled: an omitted tls defaults to true,
+// and a credential must never cross the wire in the clear because of that
+// contradiction. A scheme-less endpoint is given https, or http when TLS is
+// explicitly disabled. An empty endpoint returns an empty string, which leaves
+// the AWS SDK on Amazon S3's default endpoint.
 func (s Storage) EndpointURL() (string, error) {
 	raw := strings.TrimSpace(s.Endpoint)
 	if raw == "" {
@@ -76,6 +79,9 @@ func (s Storage) EndpointURL() (string, error) {
 		parsed, err := url.Parse(raw)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return "", fmt.Errorf("config: storage.endpoint %q is not a valid URL", raw)
+		}
+		if strings.EqualFold(parsed.Scheme, "http") && s.UseTLS() && (s.AccessKeyID.Value() != "" || s.SecretAccessKey.Value() != "") {
+			return "", fmt.Errorf("config: storage.endpoint %q is plaintext http while storage.tls defaults to true; set storage.tls: false to allow a plaintext endpoint", raw)
 		}
 		return strings.TrimRight(raw, "/"), nil
 	}

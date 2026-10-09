@@ -1,31 +1,45 @@
 # internal/cron
 
 The scheduler of this project. `weld add cron` installs an in-process scheduler
-library; it does **not** schedule any work. Nothing in the generated application
-imports this package, so building, testing and every short command (`help`,
-`version`, …) run with no scheduler and no jobs. Jobs are registered by the
-application at run time, and they run only while a long-running command (`serve`)
-has called `Start`.
+library and wires it to the `serve` command; it does **not** schedule any work.
+Jobs are declared in `internal/cron/register.go`, a stable file weld writes once
+and never regenerates, so the jobs you add there survive every later
+`weld add`.
 
-## You own the lifecycle
+## Where jobs are declared
+
+`Register` in `internal/cron/register.go` is the one place to add scheduled work:
 
 ```go
-sched := cron.New(logger, cron.WithLocation(location))
-if err := sched.Register("nightly-report", "0 3 * * *", func(ctx context.Context) {
-	report(ctx)
-}); err != nil {
-	return err
+func Register(s *cron.Scheduler) error {
+	return s.Register("nightly-report", "0 3 * * *", func(ctx context.Context) {
+		report(ctx) // ctx is canceled when the process stops
+	})
 }
-sched.Start(ctx)
-defer func() {
-	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = sched.Stop(stopCtx)
-}()
 ```
 
-The scheduler is constructed and started by the process, never by `weld add`.
-`Start` is explicit, so help, version and every short command are unaffected.
+The default implementation registers nothing, which is why installing the
+capability schedules nothing by itself.
+
+## How it follows serve
+
+The scheduler is not started by the capability and never by a short command.
+`internal/app/cron.go` (also written once and never regenerated) registers a
+runtime with the shared `internal/config` runtime seam, and the `serve` command
+builds and starts that runtime after it has bound its socket. `help`, `version`
+and every other short command never reach it.
+
+- **Plain serve.** `runServe` binds the socket, calls `config.StartRuntimes`, then
+  serves under a context a signal (`SIGINT`/`SIGTERM`) cancels. On shutdown it
+  stops the runtimes within a bounded timeout and then shuts the HTTP server
+  down.
+- **Loom serve.** `weld add loom` regenerates the graph so the root consumes
+  `*cron.Scheduler`. `NewScheduler` in the stable `internal/di/cron_provider.go`
+  seam builds the scheduler and registers its start/stop with the Loom
+  lifecycle. The provider takes the server, so the socket is bound before the
+  scheduler starts and the scheduler stops before the HTTP server.
+
+Either way, one process owns one scheduler and it runs only while `serve` runs.
 
 ## What the scheduler guarantees
 
@@ -39,7 +53,8 @@ The scheduler is constructed and started by the process, never by `weld add`.
 - **Unique names.** `Register` refuses a duplicate name (`ErrJobExists`); change
   an existing job with `Reschedule`.
 - **Dynamic registry.** `Register`, `Remove` and `Reschedule` are safe before or
-  after `Start` and safe for concurrent use.
+  after `Start` and safe for concurrent use, so a running process can add,
+  remove or reschedule jobs at run time.
 - **Overlap is skipped.** If a job is still running when its next tick arrives,
   that tick is skipped and logged, never queued.
 - **Panics are contained.** A panic inside a job is recovered and logged; the
@@ -47,10 +62,10 @@ The scheduler is constructed and started by the process, never by `weld add`.
 - **Graceful stop.** `Stop` cancels the jobs' context and waits for running jobs
   up to the deadline you pass, then returns.
 - **Per-process only.** The scheduler holds no state outside the process and
-  takes no distributed lock, so several replicas each run their own copy of every
-  job. When a job must run on exactly one replica, elect the leader yourself with
-  a database or Redis lock. The scheduler intentionally depends on neither, and
-  it has no admin API and persists nothing.
+  takes no database or Redis lock, so several replicas each run their own copy of
+  every job. When a job must run on exactly one replica, elect the leader
+  yourself with a database or Redis lock. The scheduler intentionally depends on
+  neither, and it has no admin API and persists nothing.
 
 ## Tests
 
@@ -62,21 +77,3 @@ deterministically, with no `time.Sleep`.
 ```sh
 go test -race ./internal/cron/...
 ```
-
-## Wiring it into a long-running command
-
-The scheduler must follow a long-running command — `serve`, in both the plain and
-the Loom composition — and must not start anywhere else. That wiring touches
-files the cron capability does not own, so it is proposed here and must be
-applied by the owner of those files (`capabilities/http`, `capabilities/loom`,
-`capabilities/base`). See `capabilities/cron/proposals/` in the template for the
-exact snippets:
-
-- `proposals/http_serve.snippet` — the plain `serve` command.
-- `proposals/loom_graph.snippet` — the Loom graph's scheduler provider and
-  lifecycle hooks.
-- `proposals/base_runtime.snippet` — the base-app runtime seam that lets a
-  capability attach work to the long-running commands.
-
-Until that wiring exists, the scheduler is a library you start yourself; once it
-exists, `serve` starts it and stops it with the process.

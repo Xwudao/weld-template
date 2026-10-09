@@ -7,22 +7,29 @@
 // only place that knows the whole composition; the capabilities themselves stay
 // independent.
 //
-// The graph is capability aware: installing api or web regenerates this file
-// and internal/di/loom_gen.go, so the composed application follows the installed
+// The graph is capability aware: installing a capability that feeds it (api,
+// db, redis, mail, storage or cron) regenerates this file and
+// internal/di/loom_gen.go, so the composed application follows the installed
 // capabilities without a runtime registry or service locator. Do not edit this
-// file: it is regenerated. The API service provider lives in
-// internal/di/api_provider.go and the Redis client provider in
-// internal/di/redis_provider.go, both stable files weld writes once and never
-// regenerates, so wiring there survives every later `weld add`.
+// file: it is regenerated. The stable provider seams live in separate files weld
+// writes once and never regenerates, so wiring there survives every later
+// `weld add`: the API service in internal/di/api_provider.go, and the Redis,
+// mail, object-store and cron providers in internal/di/redis_provider.go,
+// internal/di/mail_provider.go, internal/di/storage_provider.go and
+// internal/di/cron_provider.go.
 //
 // Installing db adds the pool and repository as available bindings, but nothing
 // in the default graph depends on data.Repository, so Loom prunes them: an
 // ordinary serve never constructs a pool and never needs a database credential.
 // The db capability is a library the user wires into their own providers
 // explicitly (see internal/data/README.md); Loom constructs the pool only when a
-// consumer asks for data.Repository. Installing redis likewise adds the Redis
-// client as an available binding and prunes it unless a provider asks for
-// *redis.Client (see internal/redisclient/README.md).
+// consumer asks for data.Repository. Installing redis, mail or storage likewise
+// adds a binding and prunes it unless a provider asks for *redis.Client,
+// *mailsender.Sender or *objectstore.Store (see internal/redisclient/README.md,
+// internal/mailsender/README.md and internal/objectstore/README.md). Installing
+// cron is different: the graph root consumes *cron.Scheduler, so the scheduler is
+// constructed and its start/stop hooks are registered, and the scheduler starts
+// empty until internal/cron/register.go registers jobs.
 package di
 
 import (
@@ -41,6 +48,9 @@ import (
 	"__module__/internal/api"
 {{- end}}
 	"__module__/internal/config"
+{{- if .Caps.Has "cron"}}
+	"__module__/internal/cron"
+{{- end}}
 {{- if .Caps.Has "db"}}
 	"github.com/jackc/pgx/v5/pgxpool"
 	"__module__/internal/data"
@@ -78,13 +88,42 @@ var appGraph = loom.Graph[*App](
 	// provider this graph consumes to depend on *redis.Client to switch it on.
 	loom.Provide(NewRedisClient),
 {{- end}}
+{{- if .Caps.Has "mail"}}
+	// The SMTP sender is a declared binding, not part of the default
+	// composition: nothing in this graph depends on *mailsender.Sender, so Loom
+	// prunes it and an unrelated serve never constructs a sender and never needs a
+	// mail setting. It is defined in mail_provider.go, the stable wiring seam;
+	// edit a provider this graph consumes to depend on *mailsender.Sender to
+	// switch it on.
+	loom.Provide(NewMailSender),
+{{- end}}
+{{- if .Caps.Has "storage"}}
+	// The object store is a declared binding, not part of the default
+	// composition: nothing in this graph depends on *objectstore.Store, so Loom
+	// prunes it and an unrelated serve never constructs a store and never needs a
+	// storage setting. It is defined in storage_provider.go, the stable wiring
+	// seam; edit a provider this graph consumes to depend on *objectstore.Store to
+	// switch it on.
+	loom.Provide(NewObjectStore),
+{{- end}}
+{{- if .Caps.Has "cron"}}
+	// The scheduler is different from the bindings above: the graph root consumes
+	// it, so Loom constructs it and registers its start/stop hooks. It takes the
+	// server, so the socket is bound before the scheduler starts and the scheduler
+	// stops before the server. It is defined in cron_provider.go, the stable
+	// wiring seam, and starts no jobs until internal/cron/register.go registers
+	// them.
+	loom.Provide(NewScheduler),
+{{- end}}
 	loom.Provide(NewServer),
 	loom.Provide(NewApp),
 )
 
 // App is the composed application the serve command runs. It is the composition
 // root: it holds the configuration, the HTTP server and, when the api capability
-// is installed, the API service the server serves.
+// is installed, the API service the server serves. When the cron capability is
+// installed it also holds the scheduler, so the graph constructs the scheduler
+// and its start/stop hooks run with the server rather than being pruned.
 //
 // It deliberately holds no database service. With db installed the pool and
 // repository exist as available bindings, but the default graph never depends on
@@ -95,11 +134,15 @@ type App struct {
 {{- if .Caps.Has "api"}}
 	API api.Service
 {{- end}}
+{{- if .Caps.Has "cron"}}
+	Scheduler *cron.Scheduler
+{{- end}}
 }
 
-// NewApp is the graph root.
-func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}) *App {
-	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}}
+// NewApp is the graph root. The scheduler is taken after the server so the
+// server's lifecycle hook is appended first.
+func NewApp(cfg *config.Config, server *Server{{if .Caps.Has "api"}}, service api.Service{{end}}{{if .Caps.Has "cron"}}, scheduler *cron.Scheduler{{end}}) *App {
+	return &App{Config: cfg, Server: server{{if .Caps.Has "api"}}, API: service{{end}}{{if .Caps.Has "cron"}}, Scheduler: scheduler{{end}}}
 }
 
 type addrKey struct{}

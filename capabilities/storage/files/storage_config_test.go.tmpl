@@ -183,6 +183,8 @@ func TestStorageEndpointURL(t *testing.T) {
 		{name: "scheme preserved", storage: Storage{Endpoint: "http://localhost:9000/"}, want: "http://localhost:9000"},
 		{name: "scheme-less tls default", storage: Storage{Endpoint: "s3.example.com"}, want: "https://s3.example.com"},
 		{name: "scheme-less tls off", storage: Storage{Endpoint: "localhost:9000", TLS: boolPtr(false)}, want: "http://localhost:9000"},
+		{name: "plaintext http with credentials needs tls off", storage: Storage{Endpoint: "http://localhost:9000", AccessKeyID: "key", SecretAccessKey: "secret"}, wantErr: true},
+		{name: "plaintext http with credentials and tls off", storage: Storage{Endpoint: "http://localhost:9000", TLS: boolPtr(false), AccessKeyID: "key", SecretAccessKey: "secret"}, want: "http://localhost:9000"},
 		{name: "empty stays empty", storage: Storage{}, want: ""},
 		{name: "malformed", storage: Storage{Endpoint: "http://"}, wantErr: true},
 	}
@@ -201,6 +203,27 @@ func TestStorageEndpointURL(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: EndpointURL = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestStorageRejectsPlaintextHTTPWithCredentials proves an explicit http
+// endpoint with credentials fails validation unless TLS is explicitly disabled,
+// so the secure TLS default cannot silently send a credential in the clear.
+func TestStorageRejectsPlaintextHTTPWithCredentials(t *testing.T) {
+	base := Storage{
+		Endpoint: "http://localhost:9000", Region: "us-east-1", Bucket: "uploads",
+		AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected validation to reject plaintext http with the default TLS")
+	}
+	allowed := base
+	allowed.TLS = boolPtr(false)
+	if err := allowed.Validate(); err != nil {
+		t.Fatalf("explicit tls: false must permit a local plaintext endpoint: %v", err)
+	}
+	if endpoint, err := allowed.EndpointURL(); err != nil || endpoint != "http://localhost:9000" {
+		t.Fatalf("EndpointURL = %q, %v", endpoint, err)
 	}
 }
 
