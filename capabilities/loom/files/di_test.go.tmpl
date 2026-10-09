@@ -10,7 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-{{- if .Caps.Has "api"}}
+{{- if or (.Caps.Has "api") .Modules}}
 	nethttp "net/http"
 	"net/http/httptest"
 {{- end}}
@@ -24,6 +24,9 @@ import (
 {{- end}}
 	"__module__/internal/config"
 	"__module__/internal/logging"
+{{- range .Modules}}
+	"__module__/internal/modules/{{.Name}}"
+{{- end}}
 )
 
 // The tests here exercise the composed graph without PostgreSQL: the pool is
@@ -91,7 +94,7 @@ func TestNewConfigRejectsBlankAddr(t *testing.T) {
 // consume data.Repository) does not break this regenerated test.{{end}}
 func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logger *slog.Logger) *Server {
 	t.Helper()
-	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}})
+	server, err := NewServer(lifecycle, &config.Config{HTTP: config.HTTP{Addr: addr}}, logger{{if .Caps.Has "api"}}, api.NewService(){{end}}{{range .Modules}}, {{.Name}}.NewService(){{end}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -291,7 +294,7 @@ func TestNewPoolParsesWithoutConnecting(t *testing.T) {
 {{end}}
 {{- if .Caps.Has "api"}}
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
-	mux := newMux(api.NewService())
+	mux := newMux(api.NewService(){{range .Modules}}, {{.Name}}.NewService(){{end}})
 	body := `{"name":"widget","quantity":2,"status":"active"}`
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body)))
@@ -369,6 +372,19 @@ func getJSON(t *testing.T, url string) []byte {
 		t.Fatalf("GET %s = %d: %s", url, resp.StatusCode, raw)
 	}
 	return raw
+}
+{{- end}}
+
+{{- if .Modules}}
+// TestComposedMuxServesModulesWithoutSocket proves the graph registers every
+// installed business module on the composed mux, with no socket and no database.
+func TestComposedMuxServesModulesWithoutSocket(t *testing.T) {
+	mux := newMux({{if .Caps.Has "api"}}api.NewService(),{{end}}{{range .Modules}}{{.Name}}.NewService(),{{end}})
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, {{(index .Modules 0).Name}}.RoutePrefix, nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", {{(index .Modules 0).Name}}.RoutePrefix, recorder.Code, recorder.Body)
+	}
 }
 {{- end}}
 

@@ -1,0 +1,41 @@
+package __modname__
+
+import (
+	"encoding/json"
+	nethttp "net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// TestRegisterServesGreeting exercises the module handler in process with
+// net/http/httptest: no socket and no database.
+func TestRegisterServesGreeting(t *testing.T) {
+	mux := nethttp.NewServeMux()
+	Register(mux, NewService())
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix+"?name=Ada", nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d: %s", RoutePrefix, recorder.Code, recorder.Body)
+	}
+	var response Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Module != "__modname__" || response.Message != "Hello, Ada!" {
+		t.Fatalf("response = %+v, want the module greeting", response)
+	}
+}
+
+// TestRegisterGreetsWorldByDefault checks the endpoint works without the
+// optional query parameter, so an unconfigured deployment still answers.
+func TestRegisterGreetsWorldByDefault(t *testing.T) {
+	mux := nethttp.NewServeMux()
+	Register(mux, NewService())
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix, nil))
+	if recorder.Code != nethttp.StatusOK {
+		t.Fatalf("GET %s = %d", RoutePrefix, recorder.Code)
+	}
+}

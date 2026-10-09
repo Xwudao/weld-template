@@ -70,6 +70,12 @@ capabilities/
     files/         internal/objectstore (streaming S3-compatible client),
                    internal/config/storage.go,
                    internal/di/storage_provider.go (stable Loom seam), README
+
+modules/           per-name    -> `weld add module <name>` payload (not a capability)
+  module.json      files: internal/modules/<name> (typed DTOs, Service seam,
+                   Go handler, httptest test, README), the non-Loom route seam
+                   internal/httpserver/<name>_route.go, and the weld:routes
+                   snippet; rendered once per module name
 ```
 
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
@@ -352,6 +358,24 @@ value and exports the same values as the OpenAPI `enum`. If that boilerplate
 repeats across resources, a future `weld add enum` step (or go-enum code
 generation) is the right home; the API capability deliberately does not grow
 its own enum framework.
+
+## Business modules (`modules/`)
+
+`modules/` is not a capability. A capability declares a fixed set of files;
+a business module is per-name, so `modules/module.json` declares a *template*
+that weld renders once per `weld add module <name>`, substituting the module
+name into the paths and the package, the constructor names and the URL segment.
+
+The payload generates `internal/modules/<name>`: a typed request and response,
+a `Service` interface and a `NewService` seam, a Go `net/http` handler, an
+`httptest`-driven test and a README. Without Loom, weld also writes
+`internal/httpserver/<name>_route.go` and appends one line to the `weld:routes`
+region; with Loom, the regenerated `internal/di` graph provides
+`<name>.NewService` and registers the module on the composed mux. The generated
+service is a replaceable in-memory example, not persistence. Unlike generated
+capability files, module files are written once and never regenerated.
+
+The module is recorded in `weld.json`'s `modules` list, not the capability list.
 
 ## go-validate dependency
 

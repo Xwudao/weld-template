@@ -2,6 +2,7 @@ package weldtemplate
 
 import (
 	"encoding/json"
+	"go/format"
 	"io/fs"
 	"path"
 	"strings"
@@ -1225,6 +1226,90 @@ func TestConfigCapabilityShipsRuntimeSeam(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("config runtime seam is missing %q", want)
+		}
+	}
+}
+
+// TestModuleTemplateIsWellFormed guards the per-name `weld add module` payload:
+// every declared source exists, every target carries the __modname__ token so the
+// per-module substitution produces a unique path, and every Go payload renders
+// to gofmt-clean Go for a sample module name.
+func TestModuleTemplateIsWellFormed(t *testing.T) {
+	fsys := FS()
+	raw, err := fs.ReadFile(fsys, "modules/module.json")
+	if err != nil {
+		t.Fatalf("read modules/module.json: %v", err)
+	}
+	var d struct {
+		Version string `json:"version"`
+		Files   []struct {
+			Path   string `json:"path"`
+			Source string `json:"source"`
+		} `json:"files"`
+		Route struct {
+			Path   string `json:"path"`
+			Source string `json:"source"`
+		} `json:"route"`
+		RouteSnippet string `json:"routeSnippet"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("invalid modules/module.json: %v", err)
+	}
+	if d.Version == "" {
+		t.Fatal("module.json needs a version")
+	}
+	if len(d.Files) == 0 {
+		t.Fatal("module.json declares no files")
+	}
+
+	// sources maps each declared payload to its target path. A target path must
+	// carry the module-name token: that substitution is what makes a per-module
+	// path unique.
+	sources := map[string]string{}
+	for _, file := range d.Files {
+		if !strings.Contains(file.Path, "__modname__") {
+			t.Errorf("module file path %q does not carry __modname__", file.Path)
+		}
+		sources[file.Source] = file.Path
+	}
+	if !strings.Contains(d.Route.Path, "__modname__") {
+		t.Errorf("module route path %q does not carry __modname__", d.Route.Path)
+	}
+	sources[d.Route.Source] = d.Route.Path
+	for source := range sources {
+		if _, err := fs.Stat(fsys, path.Join("modules", source)); err != nil {
+			t.Errorf("module template payload %q missing: %v", source, err)
+		}
+	}
+
+	snippet, err := fs.ReadFile(fsys, path.Join("modules", d.RouteSnippet))
+	if err != nil {
+		t.Fatalf("read route snippet %q: %v", d.RouteSnippet, err)
+	}
+	if !strings.Contains(string(snippet), "weld:module:__modname__:installed") {
+		t.Errorf("route snippet is missing the module sentinel:\n%s", snippet)
+	}
+
+	// A Go payload must be gofmt-clean once the placeholders are substituted, so
+	// a generated project builds without a formatting pass.
+	replacer := strings.NewReplacer(
+		"__name__", "demo",
+		"__module__", "example.com/demo",
+		"__version__", d.Version,
+		"__modname__", "widget",
+		"__ModName__", "Widget",
+	)
+	for source := range sources {
+		if !strings.HasSuffix(source, ".go.tmpl") {
+			continue
+		}
+		body, err := fs.ReadFile(fsys, path.Join("modules", source))
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		rendered := []byte(replacer.Replace(string(body)))
+		if _, err := format.Source(rendered); err != nil {
+			t.Errorf("%s does not render to valid Go: %v\n%s", source, err, rendered)
 		}
 	}
 }

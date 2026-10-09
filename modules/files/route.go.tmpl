@@ -1,0 +1,20 @@
+package httpserver
+
+import (
+	nethttp "net/http"
+
+	"__module__/internal/modules/__modname__"
+)
+
+// install__ModName__Route registers the __modname__ business module under
+// /api/__modname__. The weld:routes extension point wires it into Handler, so
+// route composition stays explicit and needs no init-time registration.
+//
+// This file is written once when `weld add module __modname__` runs and is not
+// regenerated, so it is the stable seam for replacing the module's default
+// in-memory service: change the argument below, or swap __modname__.NewService
+// for your own implementation. A project that uses Loom wires the module
+// through the generated internal/di graph instead.
+func install__ModName__Route(mux *nethttp.ServeMux) {
+	__modname__.Register(mux, __modname__.NewService())
+}

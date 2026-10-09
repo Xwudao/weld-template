@@ -3,7 +3,10 @@
 // Payloads are embedded so a weld binary carries its scaffold and capabilities
 // with it: no network access or template checkout is needed at run time. Each
 // capability lives in capabilities/<name>/ with a capability.json descriptor
-// and a files/ payload directory.
+// and a files/ payload directory. The per-name `weld add module <name>` payload
+// lives in modules/ with a module.json descriptor and a files/ payload
+// directory; it is not a capability because its files and paths are generated
+// per module name rather than declared once.
 //
 // This module is the only contract between the weld CLI and the template
 // payloads. The CLI imports FS() and reads descriptors from it.
@@ -17,7 +20,7 @@ import (
 // Version is the template payload version recorded in generated projects.
 const Version = "0.1.0"
 
-//go:embed all:capabilities
+//go:embed all:capabilities all:modules
 var assets embed.FS
 
 // FS returns the embedded template assets rooted at the module root.

@@ -18,6 +18,11 @@
 // internal/di/mail_provider.go, internal/di/storage_provider.go and
 // internal/di/cron_provider.go.
 //
+// Business modules installed with `weld add module` are provided by their own
+// package's NewService and registered on the mux below. They are re-rendered
+// from weld.json, so a module added after Loom appears in this graph without
+// weld editing any file in the module package.
+//
 // Installing db adds the pool and repository as available bindings, but nothing
 // in the default graph depends on data.Repository, so Loom prunes them: an
 // ordinary serve never constructs a pool and never needs a database credential.
@@ -55,6 +60,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"__module__/internal/data"
 {{- end}}
+{{- range .Modules}}
+	"__module__/internal/modules/{{.Name}}"
+{{- end}}
 	"__module__/internal/httpserver"
 	"__module__/internal/logging"
 {{- if .Caps.Has "web"}}
@@ -79,6 +87,11 @@ var appGraph = loom.Graph[*App](
 	// The provider is defined in api_provider.go, the stable wiring seam; edit
 	// that file to persist the API, never this regenerated graph.
 	loom.Provide(NewAPIService),
+{{- end}}
+{{- range .Modules}}
+	// The provider is the module package's NewService, written once by
+	// `weld add module` and never regenerated; edit it to replace the demo.
+	loom.Provide({{.Name}}.NewService),
 {{- end}}
 {{- if .Caps.Has "redis"}}
 	// The Redis client is a declared binding, not part of the default
@@ -248,13 +261,19 @@ func NewRepository(pool *pgxpool.Pool) *data.PostgresRepository {
 // the dependency graph is the single source of composition. The reserved /api/
 // namespace takes precedence over the SPA catch-all because net/http resolves
 // the more specific pattern first.
-func newMux({{if .Caps.Has "api"}}service api.Service{{end}}) *nethttp.ServeMux {
+func newMux({{if .Caps.Has "api"}}
+	service api.Service,{{end}}{{range .Modules}}
+	{{.Name}}Service {{.Name}}.Service,{{end}}
+) *nethttp.ServeMux {
 	mux := nethttp.NewServeMux()
 {{- if .Caps.Has "web"}}
 	mux.Handle("/", web.Handler())
 {{- end}}
 {{- if .Caps.Has "api"}}
 	api.Register(mux, service)
+{{- end}}
+{{- range .Modules}}
+	{{.Name}}.Register(mux, {{.Name}}Service)
 {{- end}}
 	return mux
 }
@@ -297,9 +316,18 @@ func (s *Server) Stop() error {
 // then serves in the background. A serve failure is delivered on Fail so the
 // serve command can stop and report it; a graceful shutdown delivers nil. The
 // injected logger records the startup, failure and shutdown transitions.
-func NewServer(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger{{if .Caps.Has "api"}}, service api.Service{{end}}) (*Server, error) {
+func NewServer(
+	lc *loom.Lifecycle,
+	cfg *config.Config,
+	logger *slog.Logger,{{if .Caps.Has "api"}}
+	service api.Service,{{end}}{{range .Modules}}
+	{{.Name}}Service {{.Name}}.Service,{{end}}
+) (*Server, error) {
 	server := &Server{
-		HTTP:   httpserver.NewServer(cfg.HTTP.Addr, newMux({{if .Caps.Has "api"}}service{{end}})),
+		HTTP: httpserver.NewServer(cfg.HTTP.Addr, newMux({{if .Caps.Has "api"}}
+			service,{{end}}{{range .Modules}}
+			{{.Name}}Service,{{end}}
+		)),
 		logger: logger,
 		fail:   make(chan error, 1),
 	}
