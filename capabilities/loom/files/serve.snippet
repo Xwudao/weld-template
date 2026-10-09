@@ -1,6 +1,4 @@
 	// weld:loom:installed __version__
-	RegisterCommand(Command{
-		Name:    "serve",
-		Summary: "start the HTTP server from the Loom application graph",
-		Run:     runServeLoom,
-	})
+	RegisterCommand(newServeLoomCommand)
+	ConfigureRoot(registerServeFlags)
+	SetDefaultRun(runServeLoom)

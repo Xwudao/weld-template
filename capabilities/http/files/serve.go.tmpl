@@ -3,13 +3,14 @@ package app
 import (
 	"context"
 	"errors"
-	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"__module__/internal/config"
 	httpserver "__module__/internal/httpserver"
@@ -21,54 +22,113 @@ import (
 // the HTTP server to stop, so teardown cannot hang.
 const serveShutdownTimeout = 10 * time.Second
 
+// configFlag and addrFlag are the persistent flags the root command shares
+// between `__name__ serve` and a bare `__name__`, so both read one definition.
+const (
+	configFlag = "config"
+	addrFlag   = "addr"
+)
+
 func init() {
 	// weld:serve:begin
-	RegisterCommand(Command{
-		Name:    "serve",
-		Summary: "start the HTTP server for the installed capabilities",
-		Run:     runServe,
-	})
+	RegisterCommand(newServeCommand)
+	ConfigureRoot(registerServeFlags)
+	SetDefaultRun(runServe)
 	// weld:serve:end
+}
+
+// registerServeFlags adds the HTTP lifecycle flags to the root command as
+// persistent flags, so a subcommand inherits them and a bare invocation
+// (whose default action is serve once http is installed) parses the same set.
+func registerServeFlags(root *cobra.Command) {
+	root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
+	root.PersistentFlags().String(addrFlag, "", "address to listen on (overrides config and environment)")
+}
+
+// newServeCommand builds the serve command.
+func newServeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "start the HTTP server for the installed capabilities",
+		Args:  cobra.NoArgs,
+		RunE:  runServe,
+	}
+}
+
+// serveRequest is the resolved configuration of a serve invocation.
+type serveRequest struct {
+	configPath string
+	addr       string
+	// addrSet reports whether --addr was given. An unset flag leaves the
+	// environment and the file in charge, so it is not confused with an
+	// explicit empty value.
+	addrSet bool
+}
+
+// parseServeRequest reads the shared root flags from cmd. It is used by both the
+// plain serve runner and the Loom one, so the two compositions resolve the flags
+// identically.
+func parseServeRequest(cmd *cobra.Command) (serveRequest, error) {
+	configPath, err := cmd.Flags().GetString(configFlag)
+	if err != nil {
+		return serveRequest{}, err
+	}
+	addr, err := cmd.Flags().GetString(addrFlag)
+	if err != nil {
+		return serveRequest{}, err
+	}
+	return serveRequest{
+		configPath: configPath,
+		addr:       addr,
+		addrSet:    cmd.Flags().Changed(addrFlag),
+	}, nil
+}
+
+// listenAddr returns the address serve binds. The loaded configuration already
+// applied the environment and the file, so the --addr flag only overrides it
+// when it was explicitly given, and an explicitly blank address is an error
+// rather than a silent fallback.
+func (r serveRequest) listenAddr(cfg *config.Config) (string, error) {
+	addr := cfg.HTTP.Addr
+	if r.addrSet {
+		addr = r.addr
+	}
+	if strings.TrimSpace(addr) == "" {
+		return "", errors.New("serve: listen address must not be blank")
+	}
+	return addr, nil
 }
 
 // runServe starts the HTTP server that serves every route the installed
 // capabilities contributed to internal/httpserver.
 //
-// The listen address comes from the shared config loader (config.yml, then the
-// environment), and an explicit --addr flag wins over both. It builds the logger
-// with the same base constructor the rest of the process uses, so the listening
-// and shutdown records go through the one logging protocol.
+// It is the RunE of both the serve command and, once http is installed, the bare
+// root command, so `__name__` and `__name__ serve` follow one lifecycle. The
+// listen address comes from the shared config loader (config.yml, then the
+// environment) and the shared --addr persistent flag outranks both. It builds
+// the logger with the same base constructor the rest of the process uses, so the
+// listening and shutdown records go through the one logging protocol.
 //
 // It is the command that follows a long-running process lifecycle: a signal
 // cancels the context, the registered runtimes (such as the cron scheduler)
 // start after the socket is bound and stop within serveShutdownTimeout, and a
 // serve or runtime stop failure is returned rather than swallowed. help, version
 // and every short command never reach this code.
-func runServe(args []string) error {
-	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	configPath := flags.String("config", "", "path to config.yml (default ./config.yml)")
-	addr := flags.String("addr", "", "address to listen on (overrides config and environment)")
-	if err := flags.Parse(args); err != nil {
+func runServe(cmd *cobra.Command, args []string) error {
+	request, err := parseServeRequest(cmd)
+	if err != nil {
 		return err
 	}
-	cfg, err := config.NewOsLoader().Load(*configPath)
+	cfg, err := config.NewOsLoader().Load(request.configPath)
 	if err != nil {
 		return err
 	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	listenAddr := cfg.HTTP.Addr
-	// A command-line flag outranks the environment and the file, so it is
-	// applied last and only when it was actually set.
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "addr" {
-			listenAddr = *addr
-		}
-	})
-	if strings.TrimSpace(listenAddr) == "" {
-		return errors.New("serve: listen address must not be blank")
+	listenAddr, err := request.listenAddr(cfg)
+	if err != nil {
+		return err
 	}
 	logger := logging.New(os.Stderr, logging.TextFormat, nil)
 

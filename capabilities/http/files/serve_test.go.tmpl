@@ -7,35 +7,99 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"__module__/internal/config"
 	"__module__/internal/logging"
 )
 
-func TestServeCommandIsRegistered(t *testing.T) {
-	command, ok := commands["serve"]
-	if !ok {
-		t.Fatal("serve command is not registered")
+// TestRootBuildsAServeCommand proves the http capability contributes one serve
+// command and installs it as the bare root action, so `__name__` and
+// `__name__ serve` are the same invocation. It holds for the plain and Loom
+// compositions because both register a serve command and a root default.
+func TestRootBuildsAServeCommand(t *testing.T) {
+	root := NewRootCommand()
+	command, _, err := root.Find([]string{"serve"})
+	if err != nil {
+		t.Fatalf("find serve: %v", err)
 	}
-	if command.Summary == "" || command.Run == nil {
-		t.Fatalf("serve command = %+v", command)
+	if command.Name() != "serve" {
+		t.Fatalf("serve command = %q, want serve", command.Name())
+	}
+	if command.RunE == nil {
+		t.Fatal("serve command has no run function")
+	}
+	if root.RunE == nil {
+		t.Fatal("root has no default run function; a bare invocation would not serve")
 	}
 }
 
-// TestRunServeRejectsUnknownFlag exercises the command without opening a
-// socket: flag parsing fails before Serve is called.
-func TestRunServeRejectsUnknownFlag(t *testing.T) {
-	err := runServe([]string{"--nope"})
-	if err == nil {
+// TestRootRejectsUnknownServeFlag exercises flag parsing without opening a
+// socket: Cobra rejects the unknown flag before the run function is reached.
+func TestRootRejectsUnknownServeFlag(t *testing.T) {
+	root := NewRootCommand()
+	root.SetArgs([]string{"serve", "--nope"})
+	if err := root.Execute(); err == nil {
 		t.Fatal("expected an error for an unknown flag")
 	}
-	if !strings.Contains(err.Error(), "flag") {
-		t.Fatalf("error = %v", err)
+}
+
+// TestParseServeRequestReadsSharedFlags proves --config and --addr are shared
+// persistent flags and that an unset --addr reports addrSet false, so it does
+// not shadow the environment or the file with an empty value.
+func TestParseServeRequestReadsSharedFlags(t *testing.T) {
+	cmd := &cobra.Command{Use: "serve"}
+	registerServeFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--config", "custom.yml", "--addr", "127.0.0.1:9999"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	request, err := parseServeRequest(cmd)
+	if err != nil {
+		t.Fatalf("parseServeRequest: %v", err)
+	}
+	if request.configPath != "custom.yml" {
+		t.Errorf("configPath = %q, want custom.yml", request.configPath)
+	}
+	if request.addr != "127.0.0.1:9999" {
+		t.Errorf("addr = %q, want 127.0.0.1:9999", request.addr)
+	}
+	if !request.addrSet {
+		t.Error("addrSet = false after --addr was given")
+	}
+
+	unset := &cobra.Command{Use: "serve"}
+	registerServeFlags(unset)
+	if err := unset.ParseFlags(nil); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	request, err = parseServeRequest(unset)
+	if err != nil {
+		t.Fatalf("parseServeRequest: %v", err)
+	}
+	if request.addrSet || request.addr != "" || request.configPath != "" {
+		t.Errorf("unset request = %+v, want zero flags", request)
+	}
+}
+
+// TestServeRequestListenAddrPrecedence proves the --addr flag outranks the
+// loaded configuration only when it was set, and that an explicitly blank
+// address is an error rather than a silent fallback.
+func TestServeRequestListenAddrPrecedence(t *testing.T) {
+	cfg := &config.Config{HTTP: config.HTTP{Addr: ":8080"}}
+	if got, err := (serveRequest{addr: ":9090"}).listenAddr(cfg); err != nil || got != ":8080" {
+		t.Errorf("unset flag: listenAddr = %q, %v; want :8080", got, err)
+	}
+	if got, err := (serveRequest{addr: ":9090", addrSet: true}).listenAddr(cfg); err != nil || got != ":9090" {
+		t.Errorf("set flag: listenAddr = %q, %v; want :9090", got, err)
+	}
+	if _, err := (serveRequest{addr: "  ", addrSet: true}).listenAddr(cfg); err == nil {
+		t.Error("a blank --addr did not fail")
 	}
 }
 
 // TestServeWithContextBindsLogsAndStops proves the lifecycle helper binds the
 // socket, records the listening and shutdown lines, and returns once ctx is
-// canceled, so runServe is only the signal wrapper around it.
+// canceled, so runServe is only the flag-and-signal wrapper around it.
 func TestServeWithContextBindsLogsAndStops(t *testing.T) {
 	var records bytes.Buffer
 	logger := logging.New(&records, logging.TextFormat, nil)

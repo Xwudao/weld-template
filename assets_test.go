@@ -576,6 +576,69 @@ func TestBaseCapabilityShipsInjectedLogger(t *testing.T) {
 	}
 }
 
+// TestBaseCapabilityShipsCobraCommandSeams guards the base contract after the
+// Cobra migration: the base app builds a Cobra command tree and exposes the
+// three contribution seams a capability or business module uses, go.mod pins
+// Cobra (with its own requirements) and go.sum ships with the scaffold so a
+// fresh project builds with no network access.
+func TestBaseCapabilityShipsCobraCommandSeams(t *testing.T) {
+	appGo, err := fs.ReadFile(FS(), "capabilities/base/files/app.go.tmpl")
+	if err != nil {
+		t.Fatalf("read base app.go: %v", err)
+	}
+	appText := string(appGo)
+	for _, want := range []string{
+		"github.com/spf13/cobra",
+		"type CommandFactory func() *cobra.Command",
+		"func RegisterCommand(",
+		"func ConfigureRoot(",
+		"func SetDefaultRun(",
+		"func NewRootCommand() *cobra.Command",
+	} {
+		if !strings.Contains(appText, want) {
+			t.Errorf("base app.go is missing the command seam %q", want)
+		}
+	}
+
+	mod, err := fs.ReadFile(FS(), "capabilities/base/files/go.mod.tmpl")
+	if err != nil {
+		t.Fatalf("read base go.mod: %v", err)
+	}
+	modText := string(mod)
+	for _, want := range []string{"require github.com/spf13/cobra v1.9.1", "github.com/spf13/pflag", "github.com/inconshreveable/mousetrap"} {
+		if !strings.Contains(modText, want) {
+			t.Errorf("base go.mod does not pin %q", want)
+		}
+	}
+	if !strings.Contains(modText, "weld:deps:begin") {
+		t.Error("base go.mod lost the weld:deps extension point")
+	}
+	if _, err := fs.ReadFile(FS(), "capabilities/base/files/go.sum"); err != nil {
+		t.Errorf("base go.sum is missing: %v", err)
+	}
+}
+
+// TestLoomServeSnippetRebuildsTheCobraServe guards the Loom replacement of the
+// serve registration: it must re-register the Loom serve command, keep the
+// shared root flags and keep a bare invocation running the graph, so the Cobra
+// migration did not silently drop --config/--addr on a Loom project.
+func TestLoomServeSnippetRebuildsTheCobraServe(t *testing.T) {
+	snippet, err := fs.ReadFile(FS(), "capabilities/loom/files/serve.snippet")
+	if err != nil {
+		t.Fatalf("read loom serve snippet: %v", err)
+	}
+	snippetText := string(snippet)
+	for _, want := range []string{
+		"RegisterCommand(newServeLoomCommand)",
+		"ConfigureRoot(registerServeFlags)",
+		"SetDefaultRun(runServeLoom)",
+	} {
+		if !strings.Contains(snippetText, want) {
+			t.Errorf("loom serve snippet is missing %q:\n%s", want, snippetText)
+		}
+	}
+}
+
 // TestHTTPCapabilityInjectsLogger guards the http logging wiring: the serve
 // command builds the injected logger from the base factory and records the
 // listening and shutdown lines through it, while server.go never writes to the
