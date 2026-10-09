@@ -1,0 +1,20 @@
+package app
+
+import (
+	"github.com/spf13/cobra"
+
+	command "__module__/internal/commands/__modname__"
+	module "__module__/internal/modules/__modname__"
+)
+
+// The __modname__ command group, bound to the __modname__ business module's
+// Service so the command line and the HTTP handler share one business layer.
+// This file is written once when `weld add module __modname__ --command` runs
+// and is never regenerated; edit it to inject a different service.
+func init() {
+	RegisterCommand(new__ModName__Command)
+}
+
+func new__ModName__Command() *cobra.Command {
+	return command.NewCommand(module.NewService())
+}

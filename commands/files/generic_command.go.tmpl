@@ -1,0 +1,31 @@
+// Package __modname__ is a generated command group for __name__.
+//
+// `weld add command __modname__` generated this package once and recorded every
+// file in weld.json. weld never regenerates it, so your edits survive later
+// `weld add` commands.
+//
+// It is an independent root command: it needs no HTTP server, no configuration
+// and no database, and a bare invocation shows help rather than starting any
+// long-running work. Add subcommands with cmd.AddCommand to give the group real
+// behaviour.
+//
+// internal/app/__modname___command.go registers the group on the root command.
+// Edit that file to pass business services into NewCommand: a command for a
+// business module added with `weld add module` can take that module's Service,
+// so the command and the HTTP handler share one business layer.
+package __modname__
+
+import "github.com/spf13/cobra"
+
+// NewCommand builds the __modname__ command group.
+//
+// It takes no dependencies, so it stays independent of the rest of the
+// application. The default action shows help; add subcommands to give it work.
+func NewCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "__modname__",
+		Short: "the __modname__ command group",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+}

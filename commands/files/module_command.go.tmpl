@@ -1,0 +1,26 @@
+// Package __modname__ is a generated command group for __name__.
+//
+// `weld add module __modname__ --command` exposes the __modname__ business
+// module on the command line. It receives the same Service interface that the
+// HTTP handler uses, but defines no business operation on the user's behalf.
+// weld writes this file once; later adds never overwrite your subcommands.
+package __modname__
+
+import (
+	"github.com/spf13/cobra"
+
+	module "__module__/internal/modules/__modname__"
+)
+
+// NewCommand builds the module's Cobra command group. Add real business
+// subcommands here and pass service to their handlers; the generated group
+// itself shows help and performs no business action.
+func NewCommand(service module.Service) *cobra.Command {
+	_ = service // Available to user-defined subcommands; the scaffold adds none.
+	return &cobra.Command{
+		Use:   "__modname__",
+		Short: "the __modname__ business module on the command line",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+}

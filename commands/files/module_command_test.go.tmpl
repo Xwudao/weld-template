@@ -1,0 +1,25 @@
+package __modname__
+
+import (
+	"testing"
+
+	module "__module__/internal/modules/__modname__"
+)
+
+// TestNewCommandBuildsGroup checks the generated factory builds the command
+// group from the module's Service and rejects an unknown subcommand.
+func TestNewCommandBuildsGroup(t *testing.T) {
+	cmd := NewCommand(module.NewService())
+	if cmd.Name() != "__modname__" {
+		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
+	}
+	if got := len(cmd.Commands()); got != 0 {
+		t.Fatalf("generated business commands = %d, want none until the user adds one", got)
+	}
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"definitely-not-a-subcommand"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("an unknown subcommand unexpectedly succeeded")
+	}
+}

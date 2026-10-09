@@ -1,0 +1,19 @@
+package __modname__
+
+import "testing"
+
+// TestNewCommandBuildsGroup checks the generated factory builds a real command
+// group: it carries the expected name and rejects an unknown subcommand instead
+// of silently succeeding.
+func TestNewCommandBuildsGroup(t *testing.T) {
+	cmd := NewCommand()
+	if cmd.Name() != "__modname__" {
+		t.Fatalf("command name = %q, want %q", cmd.Name(), "__modname__")
+	}
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"definitely-not-a-subcommand"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("an unknown subcommand unexpectedly succeeded")
+	}
+}

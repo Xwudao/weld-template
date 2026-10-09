@@ -6,7 +6,9 @@
 // and a files/ payload directory. The per-name `weld add module <name>` payload
 // lives in modules/ with a module.json descriptor and a files/ payload
 // directory; it is not a capability because its files and paths are generated
-// per module name rather than declared once.
+// per module name rather than declared once. The per-name `weld add command
+// <name>` payload likewise lives in commands/, carrying both the independent
+// (generic) command group and the module-backed variant.
 //
 // This module is the only contract between the weld CLI and the template
 // payloads. The CLI imports FS() and reads descriptors from it.
@@ -20,7 +22,7 @@ import (
 // Version is the template payload version recorded in generated projects.
 const Version = "0.1.0"
 
-//go:embed all:capabilities all:modules
+//go:embed all:capabilities all:modules all:commands
 var assets embed.FS
 
 // FS returns the embedded template assets rooted at the module root.

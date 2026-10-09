@@ -1376,3 +1376,89 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandTemplateIsWellFormed guards the per-name `weld add command` and
+// `weld add module --command` payloads: every declared source exists, every
+// target carries the __modname__ token so the per-command substitution produces
+// a unique path, the two variants declare the same targets (a name is one
+// command group, never two), and every Go payload renders to gofmt-clean Go.
+func TestCommandTemplateIsWellFormed(t *testing.T) {
+	fsys := FS()
+	raw, err := fs.ReadFile(fsys, "commands/command.json")
+	if err != nil {
+		t.Fatalf("read commands/command.json: %v", err)
+	}
+	var d struct {
+		Version string `json:"version"`
+		Generic struct {
+			Files []struct {
+				Path   string `json:"path"`
+				Source string `json:"source"`
+			} `json:"files"`
+		} `json:"generic"`
+		Module struct {
+			Files []struct {
+				Path   string `json:"path"`
+				Source string `json:"source"`
+			} `json:"files"`
+		} `json:"module"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("invalid commands/command.json: %v", err)
+	}
+	if d.Version == "" {
+		t.Fatal("command.json needs a version")
+	}
+	if len(d.Generic.Files) == 0 || len(d.Module.Files) == 0 {
+		t.Fatal("command.json needs both generic and module files")
+	}
+
+	replacer := strings.NewReplacer(
+		"__name__", "demo",
+		"__module__", "example.com/demo",
+		"__version__", d.Version,
+		"__modname__", "widget",
+		"__ModName__", "Widget",
+	)
+	targetsByVariant := map[string]map[string]bool{}
+	for _, variant := range []struct {
+		name  string
+		files []struct {
+			Path   string `json:"path"`
+			Source string `json:"source"`
+		}
+	}{{"generic", d.Generic.Files}, {"module", d.Module.Files}} {
+		targets := map[string]bool{}
+		targetsByVariant[variant.name] = targets
+		for _, file := range variant.files {
+			if !strings.Contains(file.Path, "__modname__") {
+				t.Errorf("%s file path %q does not carry __modname__", variant.name, file.Path)
+			}
+			targets[file.Path] = true
+			body, err := fs.ReadFile(fsys, path.Join("commands", file.Source))
+			if err != nil {
+				t.Errorf("%s payload %q missing: %v", variant.name, file.Source, err)
+				continue
+			}
+			if !strings.HasSuffix(file.Source, ".go.tmpl") {
+				continue
+			}
+			rendered := []byte(replacer.Replace(string(body)))
+			if _, err := format.Source(rendered); err != nil {
+				t.Errorf("%s payload %s does not render to valid Go: %v\n%s", variant.name, file.Source, err, rendered)
+			}
+		}
+	}
+	// The two variants must write the same target set, so a name is a single
+	// command group regardless of how it was created.
+	for target := range targetsByVariant["generic"] {
+		if !targetsByVariant["module"][target] {
+			t.Errorf("module variant does not write %q", target)
+		}
+	}
+	for target := range targetsByVariant["module"] {
+		if !targetsByVariant["generic"][target] {
+			t.Errorf("generic variant does not write %q", target)
+		}
+	}
+}

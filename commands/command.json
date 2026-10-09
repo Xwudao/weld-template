@@ -1,0 +1,19 @@
+{
+  "version": "0.1.0",
+  "generic": {
+    "files": [
+      { "path": "internal/commands/__modname__/command.go", "source": "files/generic_command.go.tmpl" },
+      { "path": "internal/commands/__modname__/command_test.go", "source": "files/generic_command_test.go.tmpl" },
+      { "path": "internal/commands/__modname__/README.md", "source": "files/generic_README.md.tmpl" },
+      { "path": "internal/app/__modname___command.go", "source": "files/generic_register.go.tmpl" }
+    ]
+  },
+  "module": {
+    "files": [
+      { "path": "internal/commands/__modname__/command.go", "source": "files/module_command.go.tmpl" },
+      { "path": "internal/commands/__modname__/command_test.go", "source": "files/module_command_test.go.tmpl" },
+      { "path": "internal/commands/__modname__/README.md", "source": "files/module_README.md.tmpl" },
+      { "path": "internal/app/__modname___command.go", "source": "files/module_register.go.tmpl" }
+    ]
+  }
+}

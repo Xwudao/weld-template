@@ -76,6 +76,12 @@ modules/           per-name    -> `weld add module <name>` payload (not a capabi
                    Go handler, httptest test, README), the non-Loom route seam
                    internal/httpserver/<name>_route.go, and the weld:routes
                    snippet; rendered once per module name
+
+commands/          per-name    -> `weld add command <name>` / `--command` payload
+  command.json     generic: an independent internal/commands/<name> group plus
+                   its internal/app/<name>_command.go registration; module: the
+                   same target paths backed by the module's Service. Both
+                   variants declare one target set, rendered once per name
 ```
 
 `base` is pure CLI: it never imports `net/http` and ships no configuration. It
@@ -376,6 +382,24 @@ service is a replaceable in-memory example, not persistence. Unlike generated
 capability files, module files are written once and never regenerated.
 
 The module is recorded in `weld.json`'s `modules` list, not the capability list.
+
+## Command groups (`commands/`)
+
+`commands/` is not a capability either. `commands/command.json` declares two
+variants that write the *same* target paths for a name, so a name is always one
+command group in `internal/commands/<name>` plus one registration file in
+`internal/app/<name>_command.go`:
+
+- `generic` — the independent group written by `weld add command <name>`: no
+  HTTP, configuration or database dependency, showing help on a bare invocation.
+- `module` — the group written by `weld add module <name> --command`: backed by
+  the module package's `Service` interface and `NewService` constructor, so the
+  command line and the HTTP handler share one business layer.
+
+Both register through the base app's `RegisterCommand` seam, so there is one
+root command tree and no per-project global dispatcher. The command files are
+written once and never regenerated; the command is recorded in `weld.json`'s
+`commands` list, not the capability list.
 
 ## go-validate dependency
 

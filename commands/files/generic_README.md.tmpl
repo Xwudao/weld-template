@@ -1,0 +1,23 @@
+# `__modname__` command group
+
+`weld add command __modname__` generated this package. weld writes it once and
+records every file in `weld.json`; it does not regenerate them, so your edits
+survive later `weld add` commands.
+
+## What it is
+
+An independent root command group with no HTTP, configuration or database
+dependency. `NewCommand` returns the `__modname__` command; with no subcommands
+a bare `__name__ __modname__` shows help.
+
+## How it is wired
+
+`internal/app/__modname___command.go` registers the group through
+`app.RegisterCommand`. Edit that file to pass business services into
+`NewCommand`; `__modname__.NewCommand` is the stable factory to keep.
+
+## Adding behaviour
+
+Add subcommands in `command.go` with `cmd.AddCommand`. To reuse a business
+module's logic, change `NewCommand` to accept the module's `Service`, call it
+from a subcommand, and inject it in the registration file.
