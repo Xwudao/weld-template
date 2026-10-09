@@ -1,12 +1,14 @@
 package weldtemplate
 
 import (
+	"bytes"
 	"encoding/json"
 	"go/format"
 	"io/fs"
 	"path"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 type descriptor struct {
@@ -105,27 +107,48 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 	}
 }
 
+// TestWebCapabilityRequiresHTTP guards web's single-mode contract: it needs
+// http, ships the frontend handler but no serve or route payload (the Loom
+// server graph composes web.Handler()), and patches only the Makefile and
+// git-ignore regions.
 func TestWebCapabilityRequiresHTTP(t *testing.T) {
 	d := readDescriptor(t, "web")
 	if len(d.Requires) != 1 || d.Requires[0] != "http" {
 		t.Fatalf("web requires = %v, want [http]", d.Requires)
 	}
-	if len(d.Patches) != 3 {
-		t.Fatalf("web patches = %d, want 3", len(d.Patches))
-	}
-	var routes bool
+	paths := map[string]bool{}
 	for _, file := range d.Files {
-		if file.Path == "internal/app/serve.go" {
-			t.Error("web still ships a serve command file")
+		paths[file.Path] = true
+		if file.Path == "internal/app/serve.go" || strings.HasSuffix(file.Path, "_route.go") {
+			t.Errorf("web ships the removed route/serve payload %q", file.Path)
 		}
 	}
+	for _, want := range []string{"internal/web/web.go", "internal/web/web_test.go"} {
+		if !paths[want] {
+			t.Errorf("web capability does not ship %s", want)
+		}
+	}
+	var makefile bool
 	for _, patch := range d.Patches {
-		if patch.Marker == "routes" && patch.Path == "internal/httpserver/http.go" {
-			routes = true
+		if patch.Path == "internal/httpserver/http.go" {
+			t.Errorf("web still patches the removed routes extension point: %+v", patch)
+		}
+		if patch.Path == "Makefile" && patch.Marker == "web" {
+			makefile = true
 		}
 	}
-	if !routes {
-		t.Error("web does not patch the httpserver routes extension point")
+	if !makefile {
+		t.Error("web does not patch the Makefile web extension point")
+	}
+
+	// The server graph, not a route seam, registers the frontend handler.
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom graph: %v", err)
+	}
+	graphText := string(graph)
+	if !strings.Contains(graphText, `{{- if .Caps.Has "web"}}`) || !strings.Contains(graphText, "web.Handler()") {
+		t.Error("the Loom graph does not compose web.Handler() under a web guard")
 	}
 }
 
@@ -134,8 +157,10 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 	if d.Kind != "add" {
 		t.Fatalf("http kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("http requires = %v, want [base config]", d.Requires)
+	// http requires loom (which requires config): every add except config is a
+	// Loom project, so the server graph is always available.
+	if strings.Join(d.Requires, ",") != "loom" {
+		t.Fatalf("http requires = %v, want [loom]", d.Requires)
 	}
 	paths := map[string]bool{}
 	for _, file := range d.Files {
@@ -171,8 +196,9 @@ func TestHTTPCapabilityOwnsTheServeCommand(t *testing.T) {
 }
 
 // TestAPICapabilityRequiresHTTP guards the API capability's contract: it needs
-// http, patches the go.mod dependency region and the httpserver routes region,
-// and depends on neither web nor any database.
+// http, patches the go.mod dependency region, and depends on neither web nor any
+// database. It previously patched an httpserver routes region; the Loom server
+// graph now calls api.Register directly, so the capability owns no route seam.
 func TestAPICapabilityRequiresHTTP(t *testing.T) {
 	d := readDescriptor(t, "api")
 	if d.Kind != "add" {
@@ -197,11 +223,15 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 		"internal/api/service.go",
 		"internal/api/handler.go",
 		"internal/api/openapi.go",
-		"internal/httpserver/api_route.go",
 		"internal/di/api_provider.go",
 	} {
 		if !paths[want] {
 			t.Errorf("api capability does not ship %s", want)
+		}
+	}
+	for _, file := range d.Files {
+		if strings.Contains(file.Path, "httpserver") {
+			t.Errorf("api still ships an httpserver payload %q; the graph owns route composition", file.Path)
 		}
 	}
 	// The API provider file is created only once loom is also installed: when
@@ -216,36 +246,44 @@ func TestAPICapabilityRequiresHTTP(t *testing.T) {
 	if !providerSeam {
 		t.Errorf("api api_provider.go is not guarded by when: [loom]: %+v", d.Files)
 	}
-	var deps, routes bool
+	var deps bool
 	for _, patch := range d.Patches {
 		switch {
 		case patch.Path == "go.mod" && patch.Marker == "deps":
 			deps = true
-		case patch.Path == "internal/httpserver/http.go" && patch.Marker == "routes":
-			routes = true
+		case patch.Path == "internal/httpserver/http.go":
+			t.Errorf("api still patches the removed routes extension point: %+v", patch)
 		}
 	}
 	if !deps {
 		t.Error("api does not patch the go.mod dependency region")
 	}
-	if !routes {
-		t.Error("api does not patch the httpserver routes extension point")
+
+	// The server graph registers the API routes when api is installed.
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom graph: %v", err)
+	}
+	if !strings.Contains(string(graph), `{{- if .Caps.Has "api"}}`) ||
+		!strings.Contains(string(graph), "api.Register(mux, service)") {
+		t.Error("the Loom graph does not call api.Register under an api guard")
 	}
 }
 
-// TestDBCapabilityIsIndependent guards the db capability's contract: it needs
-// only base (never http, web, api or loom), patches the go.mod dependency region
-// and the Makefile db region, and ships the SQL sources, the pinned sqlc tool
-// module, the generated sqlc package and a repository.
-func TestDBCapabilityIsIndependent(t *testing.T) {
+// TestDBCapabilityRequiresLoomNeverHTTP guards the db capability's contract: it
+// adopts Loom (which brings config) but stays independent of the HTTP surface,
+// patches the go.mod dependency region and the Makefile db region, and ships the
+// SQL sources, the pinned sqlc tool module, the generated sqlc package and a
+// repository.
+func TestDBCapabilityRequiresLoomNeverHTTP(t *testing.T) {
 	d := readDescriptor(t, "db")
 	if d.Kind != "add" {
 		t.Fatalf("db kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("db requires = %v, want [base config]", d.Requires)
+	if strings.Join(d.Requires, ",") != "loom" {
+		t.Fatalf("db requires = %v, want [loom]", d.Requires)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "loom"} {
+	for _, forbidden := range []string{"http", "web", "api"} {
 		for _, required := range d.Requires {
 			if required == forbidden {
 				t.Errorf("db requires %q", forbidden)
@@ -618,40 +656,43 @@ func TestBaseCapabilityShipsCobraCommandSeams(t *testing.T) {
 	}
 }
 
-// TestLoomServeSnippetRebuildsTheCobraServe guards the Loom replacement of the
-// serve registration: it must re-register the Loom serve command, keep the
-// shared root flags and keep a bare invocation running the graph, so the Cobra
-// migration did not silently drop --config/--addr on a Loom project.
-func TestLoomServeSnippetRebuildsTheCobraServe(t *testing.T) {
-	snippet, err := fs.ReadFile(FS(), "capabilities/loom/files/serve.snippet")
-	if err != nil {
-		t.Fatalf("read loom serve snippet: %v", err)
+// TestLoomShipsNoServeOrRoutePayloads guards the single-mode contract: the http
+// capability owns the serve command and the Loom server graph composes the
+// routes, so loom itself ships no serve or route payload and patches no serve
+// region.
+func TestLoomShipsNoServeOrRoutePayloads(t *testing.T) {
+	d := readDescriptor(t, "loom")
+	for _, file := range d.Files {
+		if strings.HasPrefix(file.Path, "internal/app/") || strings.HasSuffix(file.Path, "_route.go") {
+			t.Errorf("loom ships the removed serve/route payload %q; the http capability owns the serve command", file.Path)
+		}
 	}
-	snippetText := string(snippet)
-	for _, want := range []string{
-		"RegisterCommand(newServeLoomCommand)",
-		"ConfigureRoot(registerServeFlags)",
-		"SetDefaultRun(runServeLoom)",
-	} {
-		if !strings.Contains(snippetText, want) {
-			t.Errorf("loom serve snippet is missing %q:\n%s", want, snippetText)
+	for _, patch := range d.Patches {
+		if patch.Path == "internal/app/serve.go" {
+			t.Errorf("loom still replaces the serve region; the http capability owns it: %+v", patch)
 		}
 	}
 }
 
-// TestHTTPCapabilityInjectsLogger guards the http logging wiring: the serve
-// command builds the injected logger from the base factory and records the
-// listening and shutdown lines through it, while server.go never writes to the
-// process streams directly.
-func TestHTTPCapabilityInjectsLogger(t *testing.T) {
+// TestHTTPCapabilityDrivesTheGraph guards the http serve command: it resolves
+// the shared flags, enters the generated Loom graph and drives its lifecycle.
+// Startup and shutdown logging belong to the graph's injected logger, so the
+// command never builds its own logger or writes to the process streams, and
+// httpserver/server.go logs nothing directly.
+func TestHTTPCapabilityDrivesTheGraph(t *testing.T) {
 	serveGo, err := fs.ReadFile(FS(), "capabilities/http/files/serve.go.tmpl")
 	if err != nil {
 		t.Fatalf("read serve.go: %v", err)
 	}
 	serveText := string(serveGo)
-	for _, want := range []string{"logging.New", "logger.Info", "listening"} {
+	for _, want := range []string{"di.InitApp", "di.WithConfigPath", "lifecycle.Start", "lifecycle.Stop"} {
 		if !strings.Contains(serveText, want) {
 			t.Errorf("serve.go is missing %q:\n%s", want, serveText)
+		}
+	}
+	for _, forbidden := range []string{"logging.New", "os.Stderr", "fmt.Fprintf"} {
+		if strings.Contains(serveText, forbidden) {
+			t.Errorf("serve.go still owns logging via %q; the graph injects the logger", forbidden)
 		}
 	}
 
@@ -665,9 +706,6 @@ func TestHTTPCapabilityInjectsLogger(t *testing.T) {
 	}
 }
 
-// TestLoomCapabilityBindsLogger guards the Loom logging wiring: the graph
-// provides a *slog.Logger, the managed server consumes it, and the serve
-// command leaves startup/shutdown logging to the lifecycle.
 // TestHTTPCapabilityShipsTheHelperToolkit guards the shared HTTP layer: the http
 // capability ships internal/httpx (envelope writers, JSON binding, middleware)
 // and the project-owned middleware configuration file, and the toolkit stays
@@ -786,6 +824,9 @@ func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
 	}
 }
 
+// TestLoomCapabilityBindsLogger guards the Loom logging wiring: the graph
+// provides a *slog.Logger and the managed server consumes it, while nothing
+// installs a process-wide default logger.
 func TestLoomCapabilityBindsLogger(t *testing.T) {
 	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
 	if err != nil {
@@ -800,27 +841,19 @@ func TestLoomCapabilityBindsLogger(t *testing.T) {
 	if strings.Contains(graphText, "slog.SetDefault") {
 		t.Error("di template calls slog.SetDefault; the logger must be injected")
 	}
-
-	serveGo, err := fs.ReadFile(FS(), "capabilities/loom/files/serve_loom.go.tmpl")
-	if err != nil {
-		t.Fatalf("read serve_loom.go: %v", err)
-	}
-	if strings.Contains(string(serveGo), "fmt.Fprintf(os.Stderr") {
-		t.Errorf("serve_loom.go still prints the listening line directly:\n%s", serveGo)
-	}
 }
 
-// TestLoomCapabilityRequiresHTTPAndDeclaresGraph guards the loom capability's
-// contract: it is additive, needs only http, declares a capability-aware DI
-// graph, and replaces (never appends to) the serve registration and go directive
-// regions.
-func TestLoomCapabilityRequiresHTTPAndDeclaresGraph(t *testing.T) {
+// TestLoomCapabilityRequiresConfigAndDeclaresGraph guards the loom capability's
+// contract: it is additive, needs only config (never http), declares a
+// capability-aware DI graph, and replaces (never appends to) the go directive
+// region.
+func TestLoomCapabilityRequiresConfigAndDeclaresGraph(t *testing.T) {
 	d := readDescriptor(t, "loom")
 	if d.Kind != "add" {
 		t.Fatalf("loom kind = %q, want add", d.Kind)
 	}
-	if len(d.Requires) != 1 || d.Requires[0] != "http" {
-		t.Fatalf("loom requires = %v, want [http]", d.Requires)
+	if len(d.Requires) != 1 || d.Requires[0] != "config" {
+		t.Fatalf("loom requires = %v, want [config]", d.Requires)
 	}
 	if d.DI == nil || d.DI.Dir != "internal/di" || d.DI.Source == "" || d.DI.Test == "" {
 		t.Fatalf("loom di = %+v, want a dir, source and test", d.DI)
@@ -830,7 +863,6 @@ func TestLoomCapabilityRequiresHTTPAndDeclaresGraph(t *testing.T) {
 		paths[file.Path] = true
 	}
 	for _, want := range []string{
-		"internal/app/serve_loom.go",
 		"tools/loom/go.mod",
 		"tools/loom/go.sum",
 	} {
@@ -838,20 +870,20 @@ func TestLoomCapabilityRequiresHTTPAndDeclaresGraph(t *testing.T) {
 			t.Errorf("loom capability does not ship %s", want)
 		}
 	}
-	var goversion, serve bool
+	var goversion, makefile bool
 	for _, patch := range d.Patches {
 		switch {
 		case patch.Path == "go.mod" && patch.Marker == "goversion":
 			goversion = patch.Mode == "replace"
-		case patch.Path == "internal/app/serve.go" && patch.Marker == "serve":
-			serve = patch.Mode == "replace"
+		case patch.Path == "Makefile" && patch.Marker == "loom":
+			makefile = true
 		}
 	}
 	if !goversion {
 		t.Error("loom does not replace the go.mod goversion region")
 	}
-	if !serve {
-		t.Error("loom does not replace the serve registration region")
+	if !makefile {
+		t.Error("loom does not patch the Makefile loom extension point")
 	}
 }
 
@@ -899,7 +931,7 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read di template: %v", err)
 	}
-	for _, want := range []string{`{{if .Caps.Has "db"}}`, `{{if .Caps.Has "api"}}`, "NewPool", "loom.Provide(NewAPIService)"} {
+	for _, want := range []string{`{{- if .Caps.Has "db"}}`, `{{- if .Caps.Has "api"}}`, "NewPool", "loom.Provide(NewAPIService)"} {
 		if !strings.Contains(string(graph), want) {
 			t.Errorf("di template is missing %q", want)
 		}
@@ -918,82 +950,116 @@ func TestLoomCapabilityPinsGeneratorAndRaisesFloor(t *testing.T) {
 	}
 }
 
-// TestLoomProviderSeamIsStableAndOrderIndependent guards the durable api+db
-// wiring seam: the graph references a provider defined in
-// internal/di/api_provider.go, a file weld writes once (when api and loom are
-// both installed, whichever arrives second) and never regenerates. loom
-// declares it guarded by api; the api capability declares the identical
-// template guarded by loom, so exactly one of them writes the file in either
-// install order.
-func TestLoomProviderSeamIsStableAndOrderIndependent(t *testing.T) {
-	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/api_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom api_provider template: %v", err)
-	}
+// TestAPIProviderSeamIsOwnedByAPI guards the provider-ownership contract: the
+// capability that needs the binding owns the stable seam, the Loom graph only
+// references it, and loom never mirrors it.
+func TestAPIProviderSeamIsOwnedByAPI(t *testing.T) {
 	apiTemplate, err := fs.ReadFile(FS(), "capabilities/api/files/api_provider.go.tmpl")
 	if err != nil {
 		t.Fatalf("read api api_provider template: %v", err)
-	}
-	if string(loomTemplate) != string(apiTemplate) {
-		t.Error("the api and loom api_provider.go templates differ; the install order would change the generated file")
 	}
 	for _, want := range []string{
 		"func NewAPIService() api.Service",
 		"return api.NewService()",
 		"__module__/internal/api",
 	} {
-		if !strings.Contains(string(loomTemplate), want) {
-			t.Errorf("api_provider.go template is missing %q:\n%s", want, loomTemplate)
+		if !strings.Contains(string(apiTemplate), want) {
+			t.Errorf("api_provider.go template is missing %q:\n%s", want, apiTemplate)
 		}
 	}
 
-	d := readDescriptor(t, "loom")
+	d := readDescriptor(t, "api")
 	var providerSeam bool
 	for _, file := range d.Files {
 		if file.Path != "internal/di/api_provider.go" {
 			continue
 		}
 		providerSeam = file.Source == "files/api_provider.go.tmpl" &&
-			len(file.When) == 1 && file.When[0] == "api" && len(file.WhenAbsent) == 0
+			len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
 	}
 	if !providerSeam {
-		t.Errorf("loom api_provider.go is not declared with source files/api_provider.go.tmpl guarded by when: [api]: %+v", d.Files)
+		t.Errorf("api api_provider.go is not declared with source files/api_provider.go.tmpl guarded by when: [loom]: %+v", d.Files)
+	}
+
+	// loom must not mirror the provider: the api capability owns it.
+	loom := readDescriptor(t, "loom")
+	for _, file := range loom.Files {
+		if file.Path == "internal/di/api_provider.go" {
+			t.Error("loom mirrors api_provider.go; the api capability owns it")
+		}
+	}
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom graph: %v", err)
+	}
+	if !strings.Contains(string(graph), "loom.Provide(NewAPIService)") {
+		t.Error("the Loom graph does not reference the api provider seam")
 	}
 }
 
-// TestNoCapabilityRequiresLoom guards the opt-in contract: loom is never pulled
-// in by another capability.
-func TestNoCapabilityRequiresLoom(t *testing.T) {
+// TestEveryCapabilityExceptBaseAndConfigAdoptsLoom guards the single-mode
+// contract: base is a plain CLI and config is its pure-configuration
+// prerequisite, while every other capability is a Loom project, either
+// directly (db/redis/mail/storage/http require loom) or through http
+// (api/web/cron require http, which requires loom).
+func TestEveryCapabilityExceptBaseAndConfigAdoptsLoom(t *testing.T) {
 	entries, err := fs.ReadDir(FS(), "capabilities")
 	if err != nil {
 		t.Fatal(err)
 	}
+	requires := map[string][]string{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		d := readDescriptor(t, entry.Name())
-		for _, required := range d.Requires {
-			if required == "loom" {
-				t.Errorf("capability %s requires loom", entry.Name())
+		requires[entry.Name()] = readDescriptor(t, entry.Name()).Requires
+	}
+	adoptsLoom := func(name string) bool {
+		seen := map[string]bool{}
+		var walk func(string) bool
+		walk = func(n string) bool {
+			if seen[n] {
+				return false
+			}
+			seen[n] = true
+			for _, req := range requires[n] {
+				if req == "loom" || walk(req) {
+					return true
+				}
+			}
+			return false
+		}
+		return walk(name)
+	}
+	for name := range requires {
+		switch name {
+		case "base", "config":
+			if adoptsLoom(name) {
+				t.Errorf("%s adopts Loom; it must stay a non-Loom prerequisite", name)
+			}
+		case "loom":
+			// loom is the provider itself, so it does not "adopt" its own graph.
+		default:
+			if !adoptsLoom(name) {
+				t.Errorf("%s does not adopt Loom; every capability except base and config is a Loom project", name)
 			}
 		}
 	}
 }
 
-// TestRedisCapabilityIsConfigOnly guards the redis capability's contract: it
-// needs only base and config (never http, db, api or loom), ships the typed
-// config extension and the lazy client package, and declares its Loom provider
-// seam guarded on loom.
-func TestRedisCapabilityIsConfigOnly(t *testing.T) {
+// TestRedisCapabilityRequiresLoomWithoutHTTP guards the redis capability's
+// contract: it adopts Loom (which brings config) but stays independent of the
+// HTTP surface, ships the typed config extension and the lazy client package,
+// and declares its Loom provider seam guarded on loom.
+func TestRedisCapabilityRequiresLoomWithoutHTTP(t *testing.T) {
 	d := readDescriptor(t, "redis")
 	if d.Kind != "add" {
 		t.Fatalf("redis kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("redis requires = %v, want [base config]", d.Requires)
+	if strings.Join(d.Requires, ",") != "loom" {
+		t.Fatalf("redis requires = %v, want [loom]", d.Requires)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+	for _, forbidden := range []string{"http", "web", "api", "db"} {
 		for _, required := range d.Requires {
 			if required == forbidden {
 				t.Errorf("redis requires %q", forbidden)
@@ -1094,41 +1160,54 @@ func TestRedisCapabilityIsConfigOnly(t *testing.T) {
 	}
 }
 
-// TestRedisProviderSeamTemplatesMatch proves the redis and loom copies of the
-// provider seam are byte-identical, so the install order cannot change the
-// generated file.
-func TestRedisProviderSeamTemplatesMatch(t *testing.T) {
+// TestRedisProviderSeamIsOwnedByRedis guards provider ownership: redis ships the
+// stable internal/di/redis_provider.go seam (guarded on loom), and loom never
+// mirrors it.
+func TestRedisProviderSeamIsOwnedByRedis(t *testing.T) {
 	redisTemplate, err := fs.ReadFile(FS(), "capabilities/redis/files/redis_provider.go.tmpl")
 	if err != nil {
 		t.Fatalf("read redis redis_provider template: %v", err)
-	}
-	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/redis_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom redis_provider template: %v", err)
-	}
-	if string(redisTemplate) != string(loomTemplate) {
-		t.Error("the redis and loom redis_provider.go templates differ; the install order would change the generated file")
 	}
 	for _, want := range []string{"func NewRedisClient(cfg *config.Config) (*redis.Client, loom.Cleanup, error)", "__module__/internal/redisclient"} {
 		if !strings.Contains(string(redisTemplate), want) {
 			t.Errorf("redis_provider.go template is missing %q:\n%s", want, redisTemplate)
 		}
 	}
+
+	d := readDescriptor(t, "redis")
+	var providerSeam bool
+	for _, file := range d.Files {
+		if file.Path == "internal/di/redis_provider.go" {
+			providerSeam = file.Source == "files/redis_provider.go.tmpl" &&
+				len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+		}
+	}
+	if !providerSeam {
+		t.Errorf("redis does not ship files/redis_provider.go.tmpl guarded by when: [loom]: %+v", d.Files)
+	}
+
+	loom := readDescriptor(t, "loom")
+	for _, file := range loom.Files {
+		if file.Path == "internal/di/redis_provider.go" {
+			t.Error("loom mirrors redis_provider.go; the redis capability owns it")
+		}
+	}
 }
 
-// TestCronCapabilityIsConfigOnly guards the cron capability's contract: it needs
-// only base and config, ships the scheduler library plus a stable registration
-// file and the serve runtime, and declares its Loom provider seam guarded on
-// loom.
-func TestCronCapabilityIsConfigOnly(t *testing.T) {
+// TestCronCapabilityRequiresHTTP guards the cron capability's contract: it needs
+// http (never web, api, db or loom directly), ships the scheduler library plus a
+// stable registration file, and declares its Loom provider seam guarded on loom.
+// The plain app runtime seam is gone: the Loom cron provider owns the
+// scheduler lifecycle.
+func TestCronCapabilityRequiresHTTP(t *testing.T) {
 	d := readDescriptor(t, "cron")
 	if d.Kind != "add" {
 		t.Fatalf("cron kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("cron requires = %v, want [base config]", d.Requires)
+	if strings.Join(d.Requires, ",") != "http" {
+		t.Fatalf("cron requires = %v, want [http]", d.Requires)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+	for _, forbidden := range []string{"web", "api", "db", "loom"} {
 		for _, required := range d.Requires {
 			if required == forbidden {
 				t.Errorf("cron requires %q", forbidden)
@@ -1138,6 +1217,9 @@ func TestCronCapabilityIsConfigOnly(t *testing.T) {
 	paths := map[string]string{}
 	for _, file := range d.Files {
 		paths[file.Path] = file.Source
+		if strings.HasPrefix(file.Path, "internal/app/") {
+			t.Errorf("cron ships the removed app runtime payload %q; the Loom provider owns it", file.Path)
+		}
 	}
 	for _, want := range []string{
 		"internal/cron/cron.go",
@@ -1145,8 +1227,6 @@ func TestCronCapabilityIsConfigOnly(t *testing.T) {
 		"internal/cron/README.md",
 		"internal/config/cron.go",
 		"internal/config/cron_test.go",
-		"internal/app/cron.go",
-		"internal/app/cron_test.go",
 		"internal/di/cron_provider.go",
 	} {
 		if _, ok := paths[want]; !ok {
@@ -1156,7 +1236,8 @@ func TestCronCapabilityIsConfigOnly(t *testing.T) {
 	var providerSeam bool
 	for _, file := range d.Files {
 		if file.Path == "internal/di/cron_provider.go" {
-			providerSeam = len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
+			providerSeam = file.Source == "files/cron_provider.go.tmpl" &&
+				len(file.When) == 1 && file.When[0] == "loom" && len(file.WhenAbsent) == 0
 		}
 	}
 	if !providerSeam {
@@ -1191,16 +1272,17 @@ func TestCronCapabilityIsConfigOnly(t *testing.T) {
 		}
 	}
 
-	// The scheduler follows serve through the shared config runtime seam, and it
-	// does not schedule anything by itself.
-	appRuntime, err := fs.ReadFile(FS(), "capabilities/cron/files/app_runtime.go.tmpl")
+	// The scheduler follows serve through the Loom cron provider, the stable
+	// runtime that owns the Start/Stop hooks, and it does not schedule anything by
+	// itself.
+	provider, err := fs.ReadFile(FS(), "capabilities/cron/files/cron_provider.go.tmpl")
 	if err != nil {
-		t.Fatalf("read cron app runtime: %v", err)
+		t.Fatalf("read cron provider: %v", err)
 	}
-	appText := string(appRuntime)
-	for _, want := range []string{"config.RegisterRuntime", "cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop"} {
-		if !strings.Contains(appText, want) {
-			t.Errorf("cron app runtime is missing %q:\n%s", want, appText)
+	providerText := string(provider)
+	for _, want := range []string{"cron.New", "cron.Register", "scheduler.Start", "scheduler.Stop", "loom.Hook"} {
+		if !strings.Contains(providerText, want) {
+			t.Errorf("cron provider is missing %q:\n%s", want, providerText)
 		}
 	}
 	register, err := fs.ReadFile(FS(), "capabilities/cron/files/register.go.tmpl")
@@ -1230,20 +1312,13 @@ func TestCronCapabilityIsConfigOnly(t *testing.T) {
 	}
 }
 
-// TestCronProviderSeamTemplatesMatch proves the cron and loom copies of the
-// provider seam are byte-identical, so the install order cannot change the
-// generated file.
-func TestCronProviderSeamTemplatesMatch(t *testing.T) {
+// TestCronProviderSeamIsOwnedByCron guards provider ownership: cron ships the
+// stable internal/di/cron_provider.go seam (guarded on loom), and loom never
+// mirrors it.
+func TestCronProviderSeamIsOwnedByCron(t *testing.T) {
 	cronTemplate, err := fs.ReadFile(FS(), "capabilities/cron/files/cron_provider.go.tmpl")
 	if err != nil {
 		t.Fatalf("read cron provider template: %v", err)
-	}
-	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/cron_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom cron provider template: %v", err)
-	}
-	if string(cronTemplate) != string(loomTemplate) {
-		t.Error("the cron and loom cron_provider.go templates differ; the install order would change the generated file")
 	}
 	for _, want := range []string{
 		"func NewScheduler(lc *loom.Lifecycle, cfg *config.Config, logger *slog.Logger, server *Server) (*cron.Scheduler, error)",
@@ -1254,20 +1329,27 @@ func TestCronProviderSeamTemplatesMatch(t *testing.T) {
 			t.Errorf("cron_provider.go template is missing %q:\n%s", want, cronTemplate)
 		}
 	}
+	loom := readDescriptor(t, "loom")
+	for _, file := range loom.Files {
+		if file.Path == "internal/di/cron_provider.go" {
+			t.Error("loom mirrors cron_provider.go; the cron capability owns it")
+		}
+	}
 }
 
-// TestMailCapabilityIsConfigOnly guards the mail capability's contract: it needs
-// only base and config, ships the typed config extension and the sender package,
-// and declares its Loom provider seam guarded on loom.
-func TestMailCapabilityIsConfigOnly(t *testing.T) {
+// TestMailCapabilityRequiresLoomWithoutHTTP guards the mail capability's
+// contract: it adopts Loom (which brings config) but stays independent of the
+// HTTP surface, ships the typed config extension and the sender package, and
+// declares its Loom provider seam guarded on loom.
+func TestMailCapabilityRequiresLoomWithoutHTTP(t *testing.T) {
 	d := readDescriptor(t, "mail")
 	if d.Kind != "add" {
 		t.Fatalf("mail kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("mail requires = %v, want [base config]", d.Requires)
+	if strings.Join(d.Requires, ",") != "loom" {
+		t.Fatalf("mail requires = %v, want [loom]", d.Requires)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "db", "loom"} {
+	for _, forbidden := range []string{"http", "web", "api", "db"} {
 		for _, required := range d.Requires {
 			if required == forbidden {
 				t.Errorf("mail requires %q", forbidden)
@@ -1327,94 +1409,150 @@ func TestMailCapabilityIsConfigOnly(t *testing.T) {
 	}
 }
 
-// TestMailProviderSeamTemplatesMatch proves the mail and loom copies of the
-// provider seam are byte-identical.
-func TestMailProviderSeamTemplatesMatch(t *testing.T) {
+// TestMailProviderSeamIsOwnedByMail guards provider ownership: mail ships the
+// stable internal/di/mail_provider.go seam (guarded on loom), and loom never
+// mirrors it.
+func TestMailProviderSeamIsOwnedByMail(t *testing.T) {
 	mailTemplate, err := fs.ReadFile(FS(), "capabilities/mail/files/mail_provider.go.tmpl")
 	if err != nil {
 		t.Fatalf("read mail provider template: %v", err)
 	}
-	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/mail_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom mail provider template: %v", err)
+	for _, want := range []string{
+		"func NewMailSender(cfg *config.Config) (*mailsender.Sender, error)",
+		"__module__/internal/mailsender",
+	} {
+		if !strings.Contains(string(mailTemplate), want) {
+			t.Errorf("mail_provider.go template is missing %q:\n%s", want, mailTemplate)
+		}
 	}
-	if string(mailTemplate) != string(loomTemplate) {
-		t.Error("the mail and loom mail_provider.go templates differ; the install order would change the generated file")
+	loom := readDescriptor(t, "loom")
+	for _, file := range loom.Files {
+		if file.Path == "internal/di/mail_provider.go" {
+			t.Error("loom mirrors mail_provider.go; the mail capability owns it")
+		}
 	}
 }
 
-// TestStorageProviderSeamTemplatesMatch proves the storage and loom copies of the
-// provider seam are byte-identical.
-func TestStorageProviderSeamTemplatesMatch(t *testing.T) {
+// TestStorageProviderSeamIsOwnedByStorage guards provider ownership: storage
+// ships the stable internal/di/storage_provider.go seam (guarded on loom), and
+// loom never mirrors it.
+func TestStorageProviderSeamIsOwnedByStorage(t *testing.T) {
 	storageTemplate, err := fs.ReadFile(FS(), "capabilities/storage/files/storage_provider.go.tmpl")
 	if err != nil {
 		t.Fatalf("read storage provider template: %v", err)
 	}
-	loomTemplate, err := fs.ReadFile(FS(), "capabilities/loom/files/storage_provider.go.tmpl")
-	if err != nil {
-		t.Fatalf("read loom storage provider template: %v", err)
-	}
-	if string(storageTemplate) != string(loomTemplate) {
-		t.Error("the storage and loom storage_provider.go templates differ; the install order would change the generated file")
-	}
-}
-
-// TestLoomDeclaresAuxiliaryProviders pins the loom-side declarations that make
-// the mail, storage and cron integrations install-order independent: the graph
-// declares the pruned bindings and the served scheduler, and the mirror files
-// are declared guarded by the capability they mirror.
-func TestLoomDeclaresAuxiliaryProviders(t *testing.T) {
-	d := readDescriptor(t, "loom")
-	want := map[string]string{"mail": "", "storage": "", "cron": ""}
-	for _, file := range d.Files {
-		switch file.Path {
-		case "internal/di/mail_provider.go":
-			want["mail"] = file.Source
-		case "internal/di/storage_provider.go":
-			want["storage"] = file.Source
-		case "internal/di/cron_provider.go":
-			want["cron"] = file.Source
-		}
-		for _, name := range []string{"mail", "storage", "cron"} {
-			if file.Path == "internal/di/"+name+"_provider.go" {
-				if len(file.When) != 1 || file.When[0] != name {
-					t.Errorf("loom %s_provider.go is not guarded by when: [%s]: %+v", name, name, file)
-				}
-			}
-		}
-	}
-	for name, source := range want {
-		if source == "" {
-			t.Errorf("loom does not declare the %s provider mirror", name)
-		}
-	}
-}
-
-// TestConfigCapabilityShipsRuntimeSeam guards the shared long-running runtime
-// seam the cron scheduler follows serve through: config ships it, so a
-// capability can register a runtime without the serve command knowing it.
-func TestConfigCapabilityShipsRuntimeSeam(t *testing.T) {
-	raw, err := fs.ReadFile(FS(), "capabilities/config/files/runtime.go.tmpl")
-	if err != nil {
-		t.Fatalf("read config runtime seam: %v", err)
-	}
-	text := string(raw)
 	for _, want := range []string{
-		"type Runtime interface",
-		"type RuntimeFactory func",
-		"func RegisterRuntime(",
-		"func StartRuntimes(",
+		"func NewObjectStore(cfg *config.Config) (*objectstore.Store, loom.Cleanup, error)",
+		"__module__/internal/objectstore",
 	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("config runtime seam is missing %q", want)
+		if !strings.Contains(string(storageTemplate), want) {
+			t.Errorf("storage_provider.go template is missing %q:\n%s", want, storageTemplate)
+		}
+	}
+	loom := readDescriptor(t, "loom")
+	for _, file := range loom.Files {
+		if file.Path == "internal/di/storage_provider.go" {
+			t.Error("loom mirrors storage_provider.go; the storage capability owns it")
+		}
+	}
+}
+
+// TestLoomDeclaresAuxiliaryBindings guards the loom-side graph references that
+// make the mail/storage/redis/cron integrations work: the graph declares each
+// binding, while the owning capability ships the provider seam and loom ships no
+// provider mirror.
+func TestLoomDeclaresAuxiliaryBindings(t *testing.T) {
+	d := readDescriptor(t, "loom")
+	for _, file := range d.Files {
+		if strings.HasPrefix(file.Path, "internal/di/") && strings.HasSuffix(file.Path, "_provider.go") {
+			t.Errorf("loom ships the provider mirror %q; the owning capability ships it", file.Path)
+		}
+	}
+	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom graph: %v", err)
+	}
+	graphText := string(graph)
+	for name, binding := range map[string]string{
+		"redis":   "loom.Provide(NewRedisClient)",
+		"mail":    "loom.Provide(NewMailSender)",
+		"storage": "loom.Provide(NewObjectStore)",
+		"cron":    "loom.Provide(NewScheduler)",
+	} {
+		if !strings.Contains(graphText, binding) {
+			t.Errorf("loom graph does not declare the %s binding %q", name, binding)
+		}
+	}
+}
+
+// TestConfigCapabilityShipsNoRuntimeSeam guards the single-mode contract: the
+// generic config runtime seam is gone, so config is pure configuration and the
+// long-running scheduler is wired only through the Loom cron provider.
+func TestConfigCapabilityShipsNoRuntimeSeam(t *testing.T) {
+	d := readDescriptor(t, "config")
+	for _, file := range d.Files {
+		if strings.HasPrefix(file.Path, "internal/app/") || strings.HasSuffix(file.Path, "runtime.go") {
+			t.Errorf("config ships the removed runtime payload %q", file.Path)
+		}
+	}
+	if _, err := fs.Stat(FS(), "capabilities/config/files/runtime.go.tmpl"); err == nil {
+		t.Error("config still ships the removed runtime.go.tmpl seam")
+	}
+}
+
+// TestLoomGraphIsConditionalOnHTTP guards the capability-aware graph: without
+// http the graph declares commonModule only, so a short command builds nothing
+// long-running; with http it adds appGraph, the server and InitApp. Both
+// configurations render to gofmt-clean Go.
+func TestLoomGraphIsConditionalOnHTTP(t *testing.T) {
+	body, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read di template: %v", err)
+	}
+	render := func(caps commandTestCaps) string {
+		t.Helper()
+		tmpl, err := template.New("di.go").Option("missingkey=error").Parse(string(body))
+		if err != nil {
+			t.Fatalf("parse di template: %v", err)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, struct {
+			Name    string
+			Caps    commandTestCaps
+			Modules []struct{ Name string }
+		}{Name: "demo", Caps: caps}); err != nil {
+			t.Fatalf("render di template: %v", err)
+		}
+		out := []byte(strings.ReplaceAll(buf.String(), "__module__", "example.com/demo"))
+		if _, err := format.Source(out); err != nil {
+			t.Fatalf("graph for caps %v does not render to valid Go: %v\n%s", caps, err, out)
+		}
+		return string(out)
+	}
+
+	cli := render(commandTestCaps{})
+	if !strings.Contains(cli, "commonModule") {
+		t.Error("the http-less graph does not declare commonModule")
+	}
+	for _, forbidden := range []string{"var appGraph = loom.Graph", "loom.Name(\"InitApp\")", "func NewServer(", `nethttp "net/http"`} {
+		if strings.Contains(cli, forbidden) {
+			t.Errorf("the http-less graph contains %q; the server graph must be conditional on http", forbidden)
+		}
+	}
+
+	server := render(commandTestCaps{"http": true})
+	for _, want := range []string{"var appGraph = loom.Graph", "loom.Name(\"InitApp\")", "func NewServer(", `nethttp "net/http"`} {
+		if !strings.Contains(server, want) {
+			t.Errorf("the http graph is missing %q", want)
 		}
 	}
 }
 
 // TestModuleTemplateIsWellFormed guards the per-name `weld add module` payload:
 // every declared source exists, every target carries the __modname__ token so the
-// per-module substitution produces a unique path, and every Go payload renders
-// to gofmt-clean Go for a sample module name.
+// per-module substitution produces a unique path, every Go payload renders to
+// gofmt-clean Go for a sample module name, and the removed plain route seam is
+// gone.
 func TestModuleTemplateIsWellFormed(t *testing.T) {
 	fsys := FS()
 	raw, err := fs.ReadFile(fsys, "modules/module.json")
@@ -1427,11 +1565,6 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 			Path   string `json:"path"`
 			Source string `json:"source"`
 		} `json:"files"`
-		Route struct {
-			Path   string `json:"path"`
-			Source string `json:"source"`
-		} `json:"route"`
-		RouteSnippet string `json:"routeSnippet"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
 		t.Fatalf("invalid modules/module.json: %v", err)
@@ -1441,6 +1574,18 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 	}
 	if len(d.Files) == 0 {
 		t.Fatal("module.json declares no files")
+	}
+
+	// The plain route seam was removed: the Loom server graph registers every
+	// module from internal/di, so module.json must not declare it.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("invalid modules/module.json: %v", err)
+	}
+	for _, removed := range []string{"route", "routeSnippet"} {
+		if _, ok := fields[removed]; ok {
+			t.Errorf("modules/module.json still declares the removed %q seam", removed)
+		}
 	}
 
 	// sources maps each declared payload to its target path. A target path must
@@ -1453,22 +1598,10 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 		}
 		sources[file.Source] = file.Path
 	}
-	if !strings.Contains(d.Route.Path, "__modname__") {
-		t.Errorf("module route path %q does not carry __modname__", d.Route.Path)
-	}
-	sources[d.Route.Source] = d.Route.Path
 	for source := range sources {
 		if _, err := fs.Stat(fsys, path.Join("modules", source)); err != nil {
 			t.Errorf("module template payload %q missing: %v", source, err)
 		}
-	}
-
-	snippet, err := fs.ReadFile(fsys, path.Join("modules", d.RouteSnippet))
-	if err != nil {
-		t.Fatalf("read route snippet %q: %v", d.RouteSnippet, err)
-	}
-	if !strings.Contains(string(snippet), "weld:module:__modname__:installed") {
-		t.Errorf("route snippet is missing the module sentinel:\n%s", snippet)
 	}
 
 	// A Go payload must be gofmt-clean once the placeholders are substituted, so
@@ -1495,11 +1628,110 @@ func TestModuleTemplateIsWellFormed(t *testing.T) {
 	}
 }
 
+// TestModuleShipsNoPlainRouteTemplate guards the single-mode module contract:
+// the plain route template is gone (the Loom server graph registers
+// module.NewService), while service.go keeps the always zero-argument
+// NewDemoService fallback so a user who changes NewService's signature for the
+// graph does not break the module's own tests.
+func TestModuleShipsNoPlainRouteTemplate(t *testing.T) {
+	fsys := FS()
+	for _, removed := range []string{"modules/files/route.go.tmpl", "modules/files/routes.snippet"} {
+		if _, err := fs.Stat(fsys, removed); err == nil {
+			t.Errorf("modules still ships the removed route payload %q", removed)
+		}
+	}
+
+	service, err := fs.ReadFile(fsys, "modules/files/service.go.tmpl")
+	if err != nil {
+		t.Fatalf("read service template: %v", err)
+	}
+	serviceText := string(service)
+	if !strings.Contains(serviceText, "func NewService() Service {\n\treturn NewDemoService()\n}") {
+		t.Errorf("NewService does not delegate to the NewDemoService fallback:\n%s", serviceText)
+	}
+	if !strings.Contains(serviceText, "func NewDemoService() Service {") {
+		t.Errorf("the service template is missing the NewDemoService fallback:\n%s", serviceText)
+	}
+
+	// The Loom server graph, not a route seam, registers the module service.
+	graph, err := fs.ReadFile(fsys, "capabilities/loom/files/di.go.tmpl")
+	if err != nil {
+		t.Fatalf("read loom graph: %v", err)
+	}
+	graphText := string(graph)
+	if !strings.Contains(graphText, "loom.Provide({{.Name}}.NewService)") ||
+		!strings.Contains(graphText, "{{.Name}}.Register(mux, {{.Name}}Service)") {
+		t.Error("the Loom graph does not register the module service on the mux")
+	}
+}
+
 // TestCommandTemplateIsWellFormed guards the per-name `weld add command` and
 // `weld add module --command` payloads: every declared source exists, every
 // target carries the __modname__ token so the per-command substitution produces
 // a unique path, the two variants declare the same targets (a name is one
 // command group, never two), and every Go payload renders to gofmt-clean Go.
+// commandTestCaps is the capability set a command payload renders against.
+type commandTestCaps map[string]bool
+
+func (c commandTestCaps) Has(name string) bool { return c[name] }
+
+// commandTestVars mirrors the weld CLI's CommandTemplateVars: the fields a
+// command payload's text/template actions may reference.
+type commandTestVars struct {
+	Name     string
+	Module   string
+	Version  string
+	Caps     commandTestCaps
+	Mod      string
+	ModTitle string
+}
+
+// renderCommandPayload expands a command payload as a text/template, substitutes
+// the weld placeholder tokens, and formats a Go target, mirroring the CLI.
+func renderCommandPayload(t *testing.T, fsys fs.FS, source, target string, vars commandTestVars) []byte {
+	t.Helper()
+	body, err := fs.ReadFile(fsys, path.Join("commands", source))
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	tmpl, err := template.New(source).Option("missingkey=error").Parse(string(body))
+	if err != nil {
+		t.Fatalf("parse %s: %v", source, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		t.Fatalf("render %s: %v", source, err)
+	}
+	rendered := []byte(replaceTokens(buf.String(), vars.Name, vars.Module, vars.Version))
+	if !strings.HasSuffix(target, ".go") {
+		return rendered
+	}
+	formatted, err := format.Source(rendered)
+	if err != nil {
+		t.Fatalf("%s (%s) does not render to valid Go: %v\n%s", source, target, err, rendered)
+	}
+	return formatted
+}
+
+// replaceTokens substitutes the weld placeholder tokens a command payload
+// carries, exactly as the weld CLI does.
+func replaceTokens(text, name, module, version string) string {
+	return strings.NewReplacer(
+		"__name__", name,
+		"__module__", module,
+		"__version__", version,
+		"__modname__", "widget",
+		"__ModName__", "Widget",
+	).Replace(text)
+}
+
+// TestCommandTemplateIsWellFormed guards the per-name `weld add command` and
+// `weld add module --command` payloads: every declared source exists, every
+// target carries the __modname__ token so the per-command substitution produces
+// a unique path, the two variants declare the same targets (a name is one
+// command group, never two), the Loom graph is guarded on loom in both, and
+// every Go payload renders to gofmt-clean Go for both a plain and a Loom
+// project.
 func TestCommandTemplateIsWellFormed(t *testing.T) {
 	fsys := FS()
 	raw, err := fs.ReadFile(fsys, "commands/command.json")
@@ -1510,14 +1742,16 @@ func TestCommandTemplateIsWellFormed(t *testing.T) {
 		Version string `json:"version"`
 		Generic struct {
 			Files []struct {
-				Path   string `json:"path"`
-				Source string `json:"source"`
+				Path   string   `json:"path"`
+				Source string   `json:"source"`
+				When   []string `json:"when"`
 			} `json:"files"`
 		} `json:"generic"`
 		Module struct {
 			Files []struct {
-				Path   string `json:"path"`
-				Source string `json:"source"`
+				Path   string   `json:"path"`
+				Source string   `json:"source"`
+				When   []string `json:"when"`
 			} `json:"files"`
 		} `json:"module"`
 	}
@@ -1531,40 +1765,55 @@ func TestCommandTemplateIsWellFormed(t *testing.T) {
 		t.Fatal("command.json needs both generic and module files")
 	}
 
-	replacer := strings.NewReplacer(
-		"__name__", "demo",
-		"__module__", "example.com/demo",
-		"__version__", d.Version,
-		"__modname__", "widget",
-		"__ModName__", "Widget",
-	)
+	const graphTarget = "internal/di/__modname___graph.go"
 	targetsByVariant := map[string]map[string]bool{}
+	capsets := map[string]commandTestCaps{
+		"plain":         {},
+		"loom":          {"loom": true},
+		"loom-with-all": {"loom": true, "db": true, "redis": true, "mail": true, "storage": true},
+	}
 	for _, variant := range []struct {
 		name  string
 		files []struct {
-			Path   string `json:"path"`
-			Source string `json:"source"`
+			Path   string   `json:"path"`
+			Source string   `json:"source"`
+			When   []string `json:"when"`
 		}
 	}{{"generic", d.Generic.Files}, {"module", d.Module.Files}} {
 		targets := map[string]bool{}
 		targetsByVariant[variant.name] = targets
+		var graphWhen []string
 		for _, file := range variant.files {
 			if !strings.Contains(file.Path, "__modname__") {
 				t.Errorf("%s file path %q does not carry __modname__", variant.name, file.Path)
 			}
 			targets[file.Path] = true
-			body, err := fs.ReadFile(fsys, path.Join("commands", file.Source))
-			if err != nil {
+			if file.Path == graphTarget {
+				graphWhen = file.When
+			}
+			if _, err := fs.Stat(fsys, path.Join("commands", file.Source)); err != nil {
 				t.Errorf("%s payload %q missing: %v", variant.name, file.Source, err)
 				continue
 			}
-			if !strings.HasSuffix(file.Source, ".go.tmpl") {
+			if !strings.HasSuffix(file.Source, ".go.tmpl") && !strings.HasSuffix(file.Source, ".md.tmpl") {
 				continue
 			}
-			rendered := []byte(replacer.Replace(string(body)))
-			if _, err := format.Source(rendered); err != nil {
-				t.Errorf("%s payload %s does not render to valid Go: %v\n%s", variant.name, file.Source, err, rendered)
+			for _, caps := range capsets {
+				applies := true
+				for _, name := range file.When {
+					if !caps[name] {
+						applies = false
+					}
+				}
+				if !applies {
+					continue
+				}
+				vars := commandTestVars{Name: "demo", Module: "example.com/demo", Version: d.Version, Caps: caps, Mod: "widget", ModTitle: "Widget"}
+				renderCommandPayload(t, fsys, file.Source, file.Path, vars)
 			}
+		}
+		if len(graphWhen) != 1 || graphWhen[0] != "loom" {
+			t.Errorf("%s graph is not guarded by when: [loom]: %v", variant.name, graphWhen)
 		}
 	}
 	// The two variants must write the same target set, so a name is a single
@@ -1577,6 +1826,76 @@ func TestCommandTemplateIsWellFormed(t *testing.T) {
 	for target := range targetsByVariant["module"] {
 		if !targetsByVariant["generic"][target] {
 			t.Errorf("generic variant does not write %q", target)
+		}
+	}
+}
+
+// TestCommandGraphIsLoomAware guards the Loom command seam: the graph includes
+// the shared commonModule and its own root, never snapshots the individual
+// shared providers (so a capability installed later still reaches the command
+// through the regenerated module), and never references the HTTP server or the
+// scheduler. It also proves the rendered graph is capability independent, so a
+// `weld add db/redis/mail/storage` after the command never has to rewrite the
+// stable command graph. The generated command package never imports the Loom
+// runtime.
+func TestCommandGraphIsLoomAware(t *testing.T) {
+	fsys := FS()
+	caps := commandTestCaps{"loom": true, "db": true, "redis": true, "mail": true, "storage": true}
+	vars := commandTestVars{Name: "demo", Module: "example.com/demo", Version: "0.2.0", Caps: caps, Mod: "widget", ModTitle: "Widget"}
+	for _, source := range []string{"files/generic_graph.go.tmpl", "files/module_graph.go.tmpl"} {
+		graph := string(renderCommandPayload(t, fsys, source, "internal/di/widget_graph.go", vars))
+		for _, want := range []string{"loom.WithContext()", "commonModule"} {
+			if !strings.Contains(graph, want) {
+				t.Errorf("%s graph is missing %q:\n%s", source, want, graph)
+			}
+		}
+		// The shared providers live in commonModule in di.go, not in the stable
+		// command graph: snapshotting them here would make a capability installed
+		// later unavailable to the command forever.
+		for _, forbidden := range []string{
+			"InitApp", "NewServer", "NewScheduler", "Scheduler",
+			"NewConfigLoader", "NewConfig)", "NewLogger",
+			"NewPool", "NewRepository", "data.Repository",
+			"NewRedisClient", "NewMailSender", "NewObjectStore",
+		} {
+			if strings.Contains(graph, forbidden) {
+				t.Errorf("%s graph snapshots the shared provider %q; it belongs to commonModule in di.go:\n%s", source, forbidden, graph)
+			}
+		}
+	}
+	// The two variants keep their own root, the only part that legitimately
+	// differs.
+	generic := string(renderCommandPayload(t, fsys, "files/generic_graph.go.tmpl", "internal/di/widget_graph.go", vars))
+	if !strings.Contains(generic, "loom.Provide(widget.NewDeps)") {
+		t.Errorf("the generic graph does not declare the command root:\n%s", generic)
+	}
+	module := string(renderCommandPayload(t, fsys, "files/module_graph.go.tmpl", "internal/di/widget_graph.go", vars))
+	for _, want := range []string{"loom.Provide(module.NewService)", "loom.Provide(command.NewDeps)"} {
+		if !strings.Contains(module, want) {
+			t.Errorf("the module graph is missing %q:\n%s", want, module)
+		}
+	}
+
+	// The graph must render identically whether or not the optional capabilities
+	// are installed: that is what lets `weld add db/redis/mail/storage` propagate
+	// through commonModule instead of rewriting the stable command graph.
+	loomOnly := commandTestVars{Name: "demo", Module: "example.com/demo", Version: "0.2.0", Caps: commandTestCaps{"loom": true}, Mod: "widget", ModTitle: "Widget"}
+	for _, source := range []string{"files/generic_graph.go.tmpl", "files/module_graph.go.tmpl"} {
+		before := string(renderCommandPayload(t, fsys, source, "internal/di/widget_graph.go", loomOnly))
+		after := string(renderCommandPayload(t, fsys, source, "internal/di/widget_graph.go", vars))
+		if before != after {
+			t.Errorf("%s depends on the installed capability set; a later `weld add` would have to rewrite the stable command graph:\n--- loom only ---\n%s\n--- with all ---\n%s", source, before, after)
+		}
+	}
+
+	// The generated command package must not import the Loom runtime.
+	for _, source := range []string{"files/generic_command.go.tmpl", "files/module_command.go.tmpl"} {
+		body, err := fs.ReadFile(fsys, path.Join("commands", source))
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		if strings.Contains(string(body), "github.com/Xwudao/loom") {
+			t.Errorf("%s imports the Loom runtime; the command package must stay decoupled", source)
 		}
 	}
 }

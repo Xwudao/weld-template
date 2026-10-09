@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "add",
   "summary": "Opt-in S3-compatible object-storage client: typed connection configuration and an explicit streaming client the caller owns. Installing it creates no bucket and uploads nothing.",
-  "requires": ["base", "config"],
+  "requires": ["loom"],
   "files": [
     { "path": "internal/config/storage.go", "source": "files/storage_config.go.tmpl" },
     { "path": "internal/config/storage_test.go", "source": "files/storage_config_test.go.tmpl" },

@@ -12,12 +12,9 @@
     { "path": "internal/api/api_test.go", "source": "files/api_test.go.tmpl" },
     { "path": "internal/api/openapi_test.go", "source": "files/openapi_test.go.tmpl" },
     { "path": "internal/api/README.md", "source": "files/README.md" },
-    { "path": "internal/httpserver/api_route.go", "source": "files/api_route.go.tmpl" },
-    { "path": "internal/httpserver/api_test.go", "source": "files/api_compose_test.go.tmpl" },
     { "path": "internal/di/api_provider.go", "source": "files/api_provider.go.tmpl", "when": ["loom"] }
   ],
   "patches": [
-    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" },
-    { "path": "internal/httpserver/http.go", "marker": "routes", "source": "files/routes.snippet" }
+    { "path": "go.mod", "marker": "deps", "source": "files/go.mod.snippet" }
   ]
 }

@@ -15,12 +15,10 @@
     { "path": "internal/web/web.go", "source": "files/web.go.tmpl" },
     { "path": "internal/web/assets.go", "source": "files/assets.go.tmpl" },
     { "path": "internal/web/web_test.go", "source": "files/web_test.go.tmpl" },
-    { "path": "internal/web/dist/.gitkeep", "source": "files/dist.gitkeep" },
-    { "path": "internal/httpserver/web_route.go", "source": "files/web_route.go.tmpl" }
+    { "path": "internal/web/dist/.gitkeep", "source": "files/dist.gitkeep" }
   ],
   "patches": [
     { "path": "Makefile", "marker": "web", "source": "files/Makefile.snippet" },
-    { "path": ".gitignore", "marker": "web", "source": "files/gitignore.snippet" },
-    { "path": "internal/httpserver/http.go", "marker": "routes", "source": "files/routes.snippet" }
+    { "path": ".gitignore", "marker": "web", "source": "files/gitignore.snippet" }
   ]
 }

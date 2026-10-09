@@ -88,7 +88,7 @@ with.
 
 ## With Loom
 
-If the project also has the Loom capability, `weld add storage` writes
+`weld add storage` writes
 `internal/di/storage_provider.go`, a stable seam that declares `NewObjectStore`
 as an available binding. The generated graph declares it but nothing depends on
 `*objectstore.Store`, so Loom prunes it: an ordinary serve constructs no store
@@ -100,10 +100,7 @@ lifecycle releases the store's idle connections when it was constructed.
 
 To use the store, make a provider the graph already consumes depend on
 `*objectstore.Store`. `storage_provider.go` is written once and never
-regenerated, so those edits survive every later `weld add`. Whichever of
-`storage` and `loom` is installed second writes the file (both capabilities carry
-the same template, each guarded by the other), so the install order does not
-matter and `di.go` is never hand-edited.
+regenerated, so those edits survive every later `weld add`.
 
 ## Tests
 

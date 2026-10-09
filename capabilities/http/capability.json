@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "kind": "add",
   "summary": "HTTP server lifecycle, the shared JSON/middleware toolkit, a composable handler builder and one serve command.",
-  "requires": ["base", "config"],
+  "requires": ["loom"],
   "files": [
     { "path": "internal/httpserver/http.go", "source": "files/http.go.tmpl" },
     { "path": "internal/httpserver/server.go", "source": "files/server.go.tmpl" },

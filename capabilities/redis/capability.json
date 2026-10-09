@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "add",
   "summary": "Opt-in Redis client: typed connection configuration and a lazy go-redis client the caller owns. Installing the client never connects it to any service.",
-  "requires": ["base", "config"],
+  "requires": ["loom"],
   "files": [
     { "path": "internal/config/redis.go", "source": "files/redis_config.go.tmpl" },
     { "path": "internal/config/redis_test.go", "source": "files/redis_config_test.go.tmpl" },

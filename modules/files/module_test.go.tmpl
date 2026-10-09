@@ -17,11 +17,13 @@ type envelope struct {
 }
 
 // TestRegisterServesGreeting exercises the module handler in process with
-// net/http/httptest: no socket and no database. It also pins the shared
-// response envelope.
+// net/http/httptest: no socket and no database. It builds the service through
+// NewDemoService, the always zero-argument demo constructor, so it keeps
+// compiling after NewService gains a dependency for the Loom graph. It also
+// pins the shared response envelope.
 func TestRegisterServesGreeting(t *testing.T) {
 	mux := nethttp.NewServeMux()
-	Register(mux, NewService())
+	Register(mux, NewDemoService())
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix+"?name=Ada", nil))
@@ -48,7 +50,7 @@ func TestRegisterServesGreeting(t *testing.T) {
 // optional query parameter, so an unconfigured deployment still answers.
 func TestRegisterGreetsWorldByDefault(t *testing.T) {
 	mux := nethttp.NewServeMux()
-	Register(mux, NewService())
+	Register(mux, NewDemoService())
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, RoutePrefix, nil))

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "add",
   "summary": "PostgreSQL persistence: SQL migrations and queries, sqlc-generated code, an injectable pool and repository.",
-  "requires": ["base", "config"],
+  "requires": ["loom"],
   "files": [
     { "path": "sqlc.yaml", "source": "files/sqlc.yaml" },
     { "path": "db/migrations/000001_create_items.sql", "source": "files/migrations/000001_create_items.sql" },

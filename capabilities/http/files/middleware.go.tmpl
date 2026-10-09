@@ -12,7 +12,7 @@ import (
 // once when the http capability is installed: weld never regenerates this file,
 // so edits here survive every later `weld add`. Reorder the list, remove an
 // entry or append your own middleware; Chain applies whatever this returns, so
-// the plain serve command and the Loom graph always serve the identical stack.
+// the Loom composition always serves this stack.
 //
 // The list is applied outer-to-inner: the first entry is the outermost wrapper,
 // so it sees a request first and the response last. The default order is

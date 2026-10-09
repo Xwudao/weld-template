@@ -48,21 +48,22 @@ func read(t *testing.T) descriptor {
 	return d
 }
 
-// TestStorageCapabilityIsConfigOnly guards the storage contract: it needs only
-// base and config, ships no HTTP route and no bucket creation, and reaches the
-// configuration only through the shared marker regions.
-func TestStorageCapabilityIsConfigOnly(t *testing.T) {
+// TestStorageCapabilityRequiresLoomWithoutHTTP guards the storage contract: it
+// adopts Loom (which brings config) but stays independent of the HTTP surface,
+// ships no HTTP route and no bucket creation, and reaches the configuration only
+// through the shared marker regions.
+func TestStorageCapabilityRequiresLoomWithoutHTTP(t *testing.T) {
 	d := read(t)
 	if d.Kind != "add" {
 		t.Fatalf("kind = %q, want add", d.Kind)
 	}
-	if strings.Join(d.Requires, ",") != "base,config" {
-		t.Fatalf("requires = %v, want [base config]", d.Requires)
+	if strings.Join(d.Requires, ",") != "loom" {
+		t.Fatalf("requires = %v, want [loom]", d.Requires)
 	}
-	for _, forbidden := range []string{"http", "web", "api", "loom", "db"} {
+	for _, forbidden := range []string{"http", "web", "api", "db"} {
 		for _, required := range d.Requires {
 			if required == forbidden {
-				t.Errorf("storage requires %q; the client must stay independent", forbidden)
+				t.Errorf("storage requires %q; the client must stay off the HTTP surface", forbidden)
 			}
 		}
 	}

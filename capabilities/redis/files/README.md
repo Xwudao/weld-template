@@ -29,7 +29,7 @@ accident. The address defaults to `localhost:6379`; the credentials never do.
 
 ## With Loom
 
-If the project also has the Loom capability, `weld add redis` writes
+`weld add redis` writes
 `internal/di/redis_provider.go`, a stable seam that declares `NewRedisClient` as
 an available binding. The generated graph declares it but nothing depends on
 `*redis.Client`, so Loom prunes it: an ordinary serve constructs no client and

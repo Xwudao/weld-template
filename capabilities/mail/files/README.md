@@ -77,15 +77,11 @@ without changing the sender, this package or its tests.
 
 ## With Loom
 
-If the project also has the Loom capability, `weld add mail` writes
+`weld add mail` writes
 `internal/di/mail_provider.go`, a stable seam that declares `NewMailSender` as an
 available binding. The generated graph declares it but nothing depends on
 `*mailsender.Sender`, so Loom prunes it: an ordinary serve constructs no sender
 and needs no mail setting.
-
-Whichever of `mail` and `loom` is installed second writes the provider seam
-(both capabilities carry the same template, each guarded by the other), so the
-install order does not matter and `di.go` is never hand-edited.
 
 To use the sender, make a provider the graph already consumes depend on
 `*mailsender.Sender`. `mail_provider.go` is written once and never regenerated,

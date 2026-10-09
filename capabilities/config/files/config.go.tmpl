@@ -5,8 +5,8 @@
 // highest first, is: command-line flag, environment variable, YAML file, then
 // the built-in defaults. The loader takes its file reader and environment
 // lookup as dependencies, so a test exercises every branch without touching the
-// filesystem or the process environment, and the plain serve command and the
-// Loom graph share this one loader.
+// filesystem or the process environment; every Loom graph shares this one
+// loader.
 //
 // The database section is optional and is validated only when the database is
 // actually used, so an http-only project never needs a database setting. A
@@ -150,8 +150,8 @@ func NewLoader(readFile ReadFileFunc, lookupEnv LookupEnvFunc) *Loader {
 }
 
 // NewOsLoader builds the loader ordinary endpoints use: the filesystem and the
-// process environment. Both the plain serve command and the Loom graph use it,
-// so there is one configuration path rather than one per composition.
+// process environment. Every Loom graph uses it, so there is one
+// configuration path.
 func NewOsLoader() *Loader {
 	return NewLoader(os.ReadFile, os.LookupEnv)
 }

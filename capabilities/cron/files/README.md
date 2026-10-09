@@ -24,22 +24,16 @@ capability schedules nothing by itself.
 ## How it follows serve
 
 The scheduler is not started by the capability and never by a short command.
-`internal/app/cron.go` (also written once and never regenerated) registers a
-runtime with the shared `internal/config` runtime seam, and the `serve` command
-builds and starts that runtime after it has bound its socket. `help`, `version`
-and every other short command never reach it.
+`weld add cron` requires `http` (and therefore `loom`), so the server graph root
+consumes `*cron.Scheduler`: `NewScheduler` in the stable
+`internal/di/cron_provider.go` seam builds the scheduler and registers its
+start/stop with the Loom lifecycle. `help`, `version` and every other short
+command never reach it.
 
-- **Plain serve.** `runServe` binds the socket, calls `config.StartRuntimes`, then
-  serves under a context a signal (`SIGINT`/`SIGTERM`) cancels. On shutdown it
-  stops the runtimes within a bounded timeout and then shuts the HTTP server
-  down.
-- **Loom serve.** `weld add loom` regenerates the graph so the root consumes
-  `*cron.Scheduler`. `NewScheduler` in the stable `internal/di/cron_provider.go`
-  seam builds the scheduler and registers its start/stop with the Loom
-  lifecycle. The provider takes the server, so the socket is bound before the
-  scheduler starts and the scheduler stops before the HTTP server.
-
-Either way, one process owns one scheduler and it runs only while `serve` runs.
+The provider takes the server, and Loom constructs providers in dependency order
+and appends hooks as it constructs them, so the socket is bound before the
+scheduler starts and the scheduler stops before the HTTP server. One process owns
+one scheduler and it runs only while `serve` runs.
 
 ## What the scheduler guarantees
 

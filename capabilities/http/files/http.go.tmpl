@@ -1,11 +1,11 @@
 // Package httpserver owns the HTTP surface of __name__: the server lifecycle
-// and the composable handler builder that capabilities extend.
+// and the composable handler builder.
 //
-// The base CLI never imports this package. "weld add" installs the http
-// capability (with any other capability that requires it), and capabilities
-// register their routes through Handler rather than at init time. The
-// middlewares themselves, and the JSON helpers the handlers use, live in
-// internal/httpx; this package composes them.
+// The base CLI never imports this package. The http capability installs it and
+// the Loom server graph (internal/di) composes the routes — the JSON API, the
+// business modules and the SPA — into the mux it serves. NewHandler and Chain
+// remain the injectable seam a test uses to exercise a mux and the middleware
+// chain without a socket.
 package httpserver
 
 import (
@@ -20,11 +20,11 @@ type Route func(mux *nethttp.ServeMux)
 
 // Chain applies the application middleware chain to handler.
 //
-// It is the single composition point for middleware: NewHandler and Handler use
-// it for the plain serve command, and the Loom graph wraps the mux it builds
-// itself with it, so both compositions serve identical middleware semantics.
-// The stack it applies is declared in middleware.go, the stable project-owned
-// configuration file.
+// It is the single composition point for middleware: the Loom server graph
+// wraps the mux it builds with it, and NewHandler uses it for injected routes,
+// so every composition serves identical middleware semantics. The stack it
+// applies is declared in middleware.go, the stable project-owned configuration
+// file.
 func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
 	return httpx.Chain(middlewareChain(logger)...)(handler)
 }
@@ -33,33 +33,12 @@ func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
 //
 // It is the injectable seam for tests: pass routes directly to exercise the mux
 // — and the real middleware chain — without installing a capability or opening
-// a socket. Production code calls Handler, which supplies the routes
-// contributed through the weld:routes extension point below.
+// a socket. Production composition happens in the Loom server graph, which
+// registers the API and the business modules on its own mux.
 func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	for _, route := range routes {
 		route(mux)
 	}
 	return Chain(logger, mux)
-}
-
-// Handler returns the application handler composed from every capability
-// installed in this build.
-//
-// Capabilities append their Route inside the weld:routes extension point, so
-// composition is explicit and needs no init-time route registration. Route
-// order does not matter: net/http resolves the most specific pattern first, so
-// a catch-all "/" and a subtree such as "/api/" coexist either way. A handler
-// mounted on "/" that must not answer API paths excludes them itself (see
-// internal/web) instead of relying on that precedence.
-//
-// The logger is injected so the middleware chain records through the one
-// application logger; a nil logger is accepted and simply silences AccessLog and
-// Recover. With no capability installed, the mux serves nothing and returns 404
-// for every request.
-func Handler(logger *slog.Logger) nethttp.Handler {
-	var routes []Route
-	// weld:routes:begin
-	// weld:routes:end
-	return NewHandler(logger, routes...)
 }

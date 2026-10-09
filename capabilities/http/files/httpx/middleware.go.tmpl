@@ -121,6 +121,12 @@ func Recover(logger *slog.Logger) Middleware {
 						"stack", string(debug.Stack()),
 					)
 				}
+				// Once the outer access logger has observed a write or flush, HTTP
+				// cannot change the status to 500. Abort the connection rather than
+				// append a JSON error envelope to a partial response (notably SSE).
+				if recorder, ok := w.(*responseRecorder); ok && recorder.status != 0 {
+					panic(http.ErrAbortHandler)
+				}
 				Error(w, http.StatusInternalServerError, ErrorMsg)
 			}()
 			next.ServeHTTP(w, r)
@@ -199,6 +205,9 @@ func (r *responseRecorder) statusCode() int {
 // Flush forwards to the wrapped writer when it supports flushing.
 func (r *responseRecorder) Flush() {
 	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		if r.status == 0 {
+			r.status = http.StatusOK // Flush commits the default response status.
+		}
 		flusher.Flush()
 	}
 }
@@ -209,7 +218,11 @@ func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, errors.New("httpx: underlying ResponseWriter is not a Hijacker")
 	}
-	return hijacker.Hijack()
+	conn, rw, err := hijacker.Hijack()
+	if err == nil && r.status == 0 {
+		r.status = http.StatusSwitchingProtocols // The writer is no longer ours.
+	}
+	return conn, rw, err
 }
 
 // Push forwards to the wrapped writer when it supports HTTP/2 server push.

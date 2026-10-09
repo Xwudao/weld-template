@@ -3,24 +3,18 @@ package app
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"__module__/internal/config"
-	httpserver "__module__/internal/httpserver"
-	"__module__/internal/logging"
+	"__module__/internal/di"
 )
 
-// serveShutdownTimeout bounds how long a signaled serve waits for the
-// registered long-running runtimes (the cron scheduler among them) and then for
-// the HTTP server to stop, so teardown cannot hang.
-const serveShutdownTimeout = 10 * time.Second
+// shutdownTimeout bounds graceful teardown after the process receives a signal.
+const shutdownTimeout = 10 * time.Second
 
 // configFlag and addrFlag are the persistent flags the root command shares
 // between `__name__ serve` and a bare `__name__`, so both read one definition.
@@ -30,26 +24,24 @@ const (
 )
 
 func init() {
-	// weld:serve:begin
 	RegisterCommand(newServeCommand)
 	ConfigureRoot(registerServeFlags)
 	SetDefaultRun(runServe)
-	// weld:serve:end
 }
 
-// registerServeFlags adds the HTTP lifecycle flags to the root command as
-// persistent flags, so a subcommand inherits them and a bare invocation
-// (whose default action is serve once http is installed) parses the same set.
+// registerServeFlags adds the serve flags to the root command as persistent
+// flags, so a subcommand inherits them and a bare invocation (whose default
+// action serves) parses the same set.
 func registerServeFlags(root *cobra.Command) {
 	root.PersistentFlags().String(configFlag, "", "path to config.yml (default ./config.yml)")
 	root.PersistentFlags().String(addrFlag, "", "address to listen on (overrides config and environment)")
 }
 
-// newServeCommand builds the serve command.
+// newServeCommand builds the serve command backed by the generated Loom graph.
 func newServeCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
-		Short: "start the HTTP server for the installed capabilities",
+		Short: "start the HTTP server from the Loom application graph",
 		Args:  cobra.NoArgs,
 		RunE:  runServe,
 	}
@@ -65,9 +57,7 @@ type serveRequest struct {
 	addrSet bool
 }
 
-// parseServeRequest reads the shared root flags from cmd. It is used by both the
-// plain serve runner and the Loom one, so the two compositions resolve the flags
-// identically.
+// parseServeRequest reads the shared root flags from cmd.
 func parseServeRequest(cmd *cobra.Command) (serveRequest, error) {
 	configPath, err := cmd.Flags().GetString(configFlag)
 	if err != nil {
@@ -84,108 +74,53 @@ func parseServeRequest(cmd *cobra.Command) (serveRequest, error) {
 	}, nil
 }
 
-// listenAddr returns the address serve binds. The loaded configuration already
-// applied the environment and the file, so the --addr flag only overrides it
-// when it was explicitly given, and an explicitly blank address is an error
-// rather than a silent fallback.
-func (r serveRequest) listenAddr(cfg *config.Config) (string, error) {
-	addr := cfg.HTTP.Addr
-	if r.addrSet {
-		addr = r.addr
-	}
-	if strings.TrimSpace(addr) == "" {
-		return "", errors.New("serve: listen address must not be blank")
-	}
-	return addr, nil
-}
-
-// runServe starts the HTTP server that serves every route the installed
-// capabilities contributed to internal/httpserver.
+// runServe starts the server through the generated Loom graph.
 //
-// It is the RunE of both the serve command and, once http is installed, the bare
-// root command, so `__name__` and `__name__ serve` follow one lifecycle. The
-// listen address comes from the shared config loader (config.yml, then the
-// environment) and the shared --addr persistent flag outranks both. It builds
-// the logger with the same base constructor the rest of the process uses, so the
-// listening and shutdown records go through the one logging protocol.
+// The graph owns construction and the lifecycle; this command only resolves the
+// configuration path and the listen address from the shared root flags, installs
+// signal handling and drives Start/Stop, so context cancellation reaches the
+// managed HTTP server. It returns when a signal arrives or the server fails,
+// then stops the lifecycle gracefully and reports any shutdown error alongside
+// that failure.
 //
-// It is the command that follows a long-running process lifecycle: a signal
-// cancels the context, the registered runtimes (such as the cron scheduler)
-// start after the socket is bound and stop within serveShutdownTimeout, and a
-// serve or runtime stop failure is returned rather than swallowed. help, version
-// and every short command never reach this code.
-func runServe(cmd *cobra.Command, args []string) error {
+// It is the command that follows a long-running process lifecycle: the graph
+// binds the socket, and its start and stop hooks (the cron scheduler among
+// them) run with the lifecycle. help, version and every short command never
+// reach this code.
+func runServe(cmd *cobra.Command, args []string) (err error) {
 	request, err := parseServeRequest(cmd)
 	if err != nil {
 		return err
 	}
-	cfg, err := config.NewOsLoader().Load(request.configPath)
-	if err != nil {
-		return err
-	}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	listenAddr, err := request.listenAddr(cfg)
-	if err != nil {
-		return err
-	}
-	logger := logging.New(os.Stderr, logging.TextFormat, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx = di.WithConfigPath(ctx, request.configPath)
+	// A command-line flag outranks the environment and the file, so the graph is
+	// told about the address only when it was actually set.
+	if request.addrSet {
+		ctx = di.WithAddr(ctx, request.addr)
+	}
 
-	return serveWithContext(ctx, cfg, listenAddr, logger)
-}
-
-// serveWithContext runs the serve lifecycle against ctx: bind the socket, record
-// the listening line, start the registered runtimes, serve until ctx is canceled
-// or the server fails, then stop the runtimes before shutting the HTTP server
-// down.
-//
-// The order matters and mirrors the Loom graph: the runtimes stop first while
-// the server is still up, and the HTTP server shuts down last. Every error is
-// joined rather than logged and dropped, so a failed runtime stop makes serve
-// fail. It takes ctx as a parameter so a test can drive the lifecycle without a
-// signal.
-func serveWithContext(ctx context.Context, cfg *config.Config, listenAddr string, logger *slog.Logger) error {
-	// Bind the socket before starting any long-running runtime, so a failed bind
-	// starts nothing and is reported synchronously.
-	listener, err := httpserver.Listen(listenAddr)
+	application, lifecycle, err := di.InitApp(ctx)
 	if err != nil {
 		return err
 	}
-	// Record the listening line after the socket is bound and before the runtimes
-	// start, so a reader can tell the server was up first.
-	logger.Info("__name__ listening", "addr", httpserver.DisplayAddr(listenAddr))
-
-	stopRuntimes, err := config.StartRuntimes(ctx, cfg, logger)
-	if err != nil {
-		_ = listener.Close()
+	if err := lifecycle.Start(ctx); err != nil {
 		return err
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		err = errors.Join(err, lifecycle.Stop(shutdownCtx))
+	}()
 
-	serveCtx, cancelServe := context.WithCancel(context.Background())
-	defer cancelServe()
-	serveFailed := make(chan error, 1)
-	go func() { serveFailed <- httpserver.Serve(serveCtx, listenAddr, listener, httpserver.Handler(logger)) }()
-
-	var serveErr error
+	// The graph's injected logger records startup, failure and shutdown from the
+	// server lifecycle, so this command only drives Start/Stop.
 	select {
 	case <-ctx.Done():
-	case serveErr = <-serveFailed:
+		return nil
+	case serveErr := <-application.Server.Fail():
+		return serveErr
 	}
-
-	// Stop the runtimes before the HTTP server: work that depends on the server
-	// still being reachable is torn down while it is.
-	stopCtx, cancelStop := context.WithTimeout(context.Background(), serveShutdownTimeout)
-	stopErr := stopRuntimes(stopCtx)
-	cancelStop()
-
-	logger.Info("__name__ shutting down")
-	cancelServe()
-	if serveErr == nil {
-		serveErr = <-serveFailed
-	}
-	return errors.Join(serveErr, stopErr)
 }

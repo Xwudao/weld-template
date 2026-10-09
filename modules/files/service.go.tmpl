@@ -20,10 +20,22 @@ type Service interface {
 // NewService returns the default in-memory Service.
 //
 // It is a replaceable development demo, not persistence: it holds no state
-// across restarts and needs no database. Replace its body with your own
-// implementation; both the plain and the Loom wiring call NewService, so keep
-// this symbol stable.
+// across restarts and needs no database. It is the seam the Loom server graph
+// binds (`loom.Provide(__modname__.NewService)`), so you may change its
+// signature to take the dependencies your implementation needs, such as the
+// repository the db capability declares. This package's own tests build the
+// demo through NewDemoService instead, so they keep compiling after the
+// signature changes. Keep the Service interface and this symbol stable.
 func NewService() Service {
+	return NewDemoService()
+}
+
+// NewDemoService returns the built-in in-memory demo Service.
+//
+// It always takes no arguments, so this package's tests keep compiling after
+// NewService gains a dependency for the Loom graph. Replace NewService instead
+// when you want your own implementation.
+func NewDemoService() Service {
 	return demoService{}
 }
 

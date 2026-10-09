@@ -1,22 +1,15 @@
 package app
 
 import (
-	"bytes"
-	"context"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
-
-	"__module__/internal/config"
-	"__module__/internal/logging"
 )
 
 // TestRootBuildsAServeCommand proves the http capability contributes one serve
 // command and installs it as the bare root action, so `__name__` and
-// `__name__ serve` are the same invocation. It holds for the plain and Loom
-// compositions because both register a serve command and a root default.
+// `__name__ serve` are the same invocation. The command is backed by the Loom
+// graph (internal/di), which owns construction and the lifecycle.
 func TestRootBuildsAServeCommand(t *testing.T) {
 	root := NewRootCommand()
 	command, _, err := root.Find([]string{"serve"})
@@ -78,51 +71,5 @@ func TestParseServeRequestReadsSharedFlags(t *testing.T) {
 	}
 	if request.addrSet || request.addr != "" || request.configPath != "" {
 		t.Errorf("unset request = %+v, want zero flags", request)
-	}
-}
-
-// TestServeRequestListenAddrPrecedence proves the --addr flag outranks the
-// loaded configuration only when it was set, and that an explicitly blank
-// address is an error rather than a silent fallback.
-func TestServeRequestListenAddrPrecedence(t *testing.T) {
-	cfg := &config.Config{HTTP: config.HTTP{Addr: ":8080"}}
-	if got, err := (serveRequest{addr: ":9090"}).listenAddr(cfg); err != nil || got != ":8080" {
-		t.Errorf("unset flag: listenAddr = %q, %v; want :8080", got, err)
-	}
-	if got, err := (serveRequest{addr: ":9090", addrSet: true}).listenAddr(cfg); err != nil || got != ":9090" {
-		t.Errorf("set flag: listenAddr = %q, %v; want :9090", got, err)
-	}
-	if _, err := (serveRequest{addr: "  ", addrSet: true}).listenAddr(cfg); err == nil {
-		t.Error("a blank --addr did not fail")
-	}
-}
-
-// TestServeWithContextBindsLogsAndStops proves the lifecycle helper binds the
-// socket, records the listening and shutdown lines, and returns once ctx is
-// canceled, so runServe is only the flag-and-signal wrapper around it.
-func TestServeWithContextBindsLogsAndStops(t *testing.T) {
-	var records bytes.Buffer
-	logger := logging.New(&records, logging.TextFormat, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serveWithContext(ctx, &config.Config{}, "127.0.0.1:0", logger) }()
-	cancel()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("serveWithContext: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithContext did not return after the context was canceled")
-	}
-	// Every record is written before serveWithContext returns, so reading the
-	// buffer here does not race the goroutine.
-	out := records.String()
-	for _, want := range []string{"listening", "shutting down"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("serveWithContext did not log %q:\n%s", want, out)
-		}
 	}
 }

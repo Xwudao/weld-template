@@ -29,12 +29,12 @@ weld wrote is recorded in `weld.json` with the capability and version that
 produced it.
 
 Capabilities are additive and dependency-resolved: each adds its own files and
-registers its own commands, and `weld add` installs any missing dependency
-first.
+registers its own commands, `weld add` installs any missing dependency first, and
+every added capability installs `loom` (and the `config` it requires).
 
 ```sh
-weld add web   # installs the http capability, then the React + TS + Vite frontend
-weld add api   # installs the http capability, then the JSON API + OpenAPI 3.1
+weld add web   # installs loom, config and http, then the React + TS + Vite frontend
+weld add api   # installs loom, config and http, then the JSON API + OpenAPI 3.1
 weld add db    # PostgreSQL: SQL migrations, sqlc queries and a repository (no HTTP)
 weld add redis # an opt-in Redis client with typed connection config (no HTTP)
 ```
@@ -43,10 +43,10 @@ weld add redis # an opt-in Redis client with typed connection config (no HTTP)
 server, and then the frontend it serves. `weld add api` installs the same
 `http` capability and adds the JSON API under `/api/`; it does not require the
 frontend. `web` and `api` are independent, so they can be added in either order
-and both are served by the one `serve` command. `weld add db` requires only this
-base project: it adds PostgreSQL persistence without an HTTP server, so it works
-in a CLI-only project and composes with `http`/`web`/`api` in any order.
-`weld add redis` also requires only this base project: it installs an opt-in
+and both are served by the one `serve` command. `weld add db` requires `loom`
+but not `http`: it adds PostgreSQL persistence without an HTTP server, so it
+works in a CLI-only project and composes with `http`/`web`/`api` in any order.
+`weld add redis` likewise requires `loom` but not `http`: it installs an opt-in
 Redis client that the caller owns, never a connection, so it composes with the
 other capabilities and needs no Redis server to build or serve.
 

@@ -30,7 +30,7 @@ repo := data.NewRepository(pool)
 `config.Database.ValidateDatabase` and `Config.DSN` exist for exactly this
 explicit path; an unrelated startup never calls them.
 
-If the project uses the Loom capability, the graph already declares
+The project's Loom graph already declares
 `*pgxpool.Pool` and `data.Repository` as available bindings. Rather than
 construct the pool yourself, edit `internal/di/api_provider.go`, the stable
 provider seam, to have your service consume `data.Repository`:
@@ -45,8 +45,7 @@ func NewAPIService(repo data.Repository) api.Service {
 Loom then constructs the pool, the repository and your service together,
 validating the database settings at that point, and weld never rewrites the file,
 so the edit survives later capability installs. Do not add providers to
-`internal/di/di.go`: it is regenerated. Without Loom, inject the repository in
-`internal/httpserver/api_route.go`, which is written once and left alone. See
+`internal/di/di.go`: it is regenerated. See
 `internal/di/README.md` and `internal/api/README.md`.
 
 ## SQL is the source of truth
