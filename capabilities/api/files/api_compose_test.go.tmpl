@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// The tests here exercise the composed application handler (Handler), not the
-// API package in isolation, so they prove the api capability is wired into the
-// weld:routes extension point. They do not need a socket.
+// TestComposedHandlerServesAPI proves the api capability is wired into the
+// weld:routes extension point and served through the same middleware chain the
+// server uses (the response carries a request id).
 
 func composeRequest(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -20,7 +20,7 @@ func composeRequest(t *testing.T, method, target, body string) *httptest.Respons
 		reader = strings.NewReader(body)
 	}
 	recorder := httptest.NewRecorder()
-	Handler().ServeHTTP(recorder, httptest.NewRequest(method, target, reader))
+	Handler(testLogger()).ServeHTTP(recorder, httptest.NewRequest(method, target, reader))
 	return recorder
 }
 
@@ -28,6 +28,9 @@ func TestComposedHandlerServesAPI(t *testing.T) {
 	recorder := composeRequest(t, nethttp.MethodGet, "/api/openapi.json", "")
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	if recorder.Header().Get("X-Request-Id") == "" {
+		t.Fatal("the composed handler did not run the middleware chain")
 	}
 	var document map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {

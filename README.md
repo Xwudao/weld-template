@@ -26,11 +26,14 @@ capabilities/
     capability.json
     files/         internal/config (typed structs, injectable loader, Secret),
                    config.yml (local, git-ignored), config.example.yml, snippets
-  http/            kind: add    -> HTTP lifecycle + composable handler builder
+  http/            kind: add    -> HTTP lifecycle + shared toolkit + handler builder
     capability.json
-    files/         internal/httpserver (server, injectable handler builder),
-                   internal/app/serve.go (the one serve command),
-                   config.yml / config.example.yml http section (snippet)
+    files/         internal/httpserver (server, injectable handler builder,
+                   project-owned middleware configuration in middleware.go),
+                   internal/httpx (the {code,msg,data} JSON envelope and raw
+                   writers, typed JSON binding with a body limit, composable
+                   net/http middleware), internal/app/serve.go (the one serve
+                   command), config.yml / config.example.yml http section (snippet)
   web/             kind: add    -> frontend, requires http
     capability.json
     files/         web/ (React + TS + Vite), internal/web (SPA handler),
@@ -324,18 +327,43 @@ the region untouched, so user edits in the same file survive. A patch target
 must be a file `weld` manages (or one created in the same plan); `weld` refuses
 to patch an unmanaged file.
 
-## Go route composition
+## Go route composition and the shared HTTP toolkit
 
-`internal/httpserver/http.go` owns the mux and exposes two seams:
+`internal/httpserver/http.go` owns the mux and exposes three seams:
 
-- `NewHandler(routes ...Route) http.Handler` builds a handler from explicit
-  routes, so tests compose a mux without a socket or a capability.
-- `Handler()` composes the routes capabilities appended through the
+- `NewHandler(logger, routes ...Route) http.Handler` builds a handler from
+  explicit routes, so tests compose a mux — and the real middleware chain —
+  without a socket or a capability.
+- `Handler(logger)` composes the routes capabilities appended through the
   `weld:routes` extension point.
+- `Chain(logger, handler) http.Handler` applies the project middleware chain to
+  an already-built handler. The Loom graph composes its own mux and wraps it
+  with `Chain`, so the plain serve command and the Loom composition serve the
+  identical middleware stack.
+
+The stack itself lives in `internal/httpserver/middleware.go`, a project-owned
+file written once and never regenerated. It declares `middlewareChain(logger)`
+as an outer-to-inner list of `func(http.Handler) http.Handler`; the default is
+`RequestID`, `AccessLog` and `Recover`. No authentication, CORS or rate limiting
+is enabled by default — add such middleware there. Because the chain is an
+explicit `func(http.Handler) http.Handler`, any third-party middleware composes
+with it.
+
+`internal/httpx` is the shared toolkit both the built-in API and the generated
+business modules use: the `{code,msg,data}` JSON envelope (`JSON`, `Error`) and
+the raw writers for responses that must stay unwrapped (`RawJSON`, `RawText`,
+`Bytes`, `NoContent`); typed request binding (`DecodeJSON`, `QueryInt`) with a
+configurable body limit, a content-type check, single-value and unknown-field
+rejection and an optional code-first validator callback; and the composable
+middleware (`Chain`, `RequestID`, `AccessLog`, `Recover`). It depends only on
+the standard library — binding takes a validator callback, so `httpx` never
+imports `go-validate`, which stays a concern of `api`. The `AccessLog` recorder
+forwards `Flush` and `Hijack`, so a streaming or SSE response and a WebSocket
+upgrade keep working.
 
 `web` adds `internal/httpserver/web_route.go` (same package) and appends
-`installWebRoute` to that region, so no Go import block has to be patched and
-no `init` performs route registration. `api` adds
+`installWebRoute` to the `weld:routes` region, so no Go import block has to be
+patched and no `init` performs route registration. `api` adds
 `internal/httpserver/api_route.go` and appends `installAPIRoute` to the same
 region, so both compose in either order.
 
@@ -364,6 +392,17 @@ value and exports the same values as the OpenAPI `enum`. If that boilerplate
 repeats across resources, a future `weld add enum` step (or go-enum code
 generation) is the right home; the API capability deliberately does not grow
 its own enum framework.
+
+The wire format is a default JSON envelope: responses are `{code, msg, data}`,
+where `code` repeats the HTTP transport status (200, 201, 400, 404, 500) instead
+of inventing a business code, `msg` is `success` or a client-safe error message,
+and `data` is the payload or `null`. Request bodies are the DTOs themselves. The
+handler binds and validates with `httpx.DecodeJSON`, passing `Spec().Validate`
+as the code-first validator callback. The OpenAPI response schemas describe the
+same envelope, so the document matches the wire format. `GET
+/api/openapi.json` is the one unwrapped response: it is served with
+`httpx.RawJSON`, because a spec generator must receive the OpenAPI document
+itself.
 
 ## Business modules (`modules/`)
 
@@ -416,8 +455,11 @@ committed into any scaffolded file.
 The test validates that every embedded descriptor parses, that each declared
 payload exists, that `base` stays CLI-only and ships no configuration, that
 `config` needs only `base` and patches the git-ignore and `go.mod` dependency
-regions, that `http` owns the serve command and appends its section to the
-`config` files, that `web` requires `http` and patches the routes extension
+regions, that `http` owns the serve command, ships the `internal/httpx` toolkit
+and the project-owned middleware configuration, and appends its section to the
+`config` files, that `api` and the module payload write the shared response
+envelope while the OpenAPI document stays raw, that `web` requires `http` and
+patches the routes extension
 point, that `api` requires `http` (not `web`) and patches both the routes and
 the `go.mod` dependency extension points, and that `db` requires `base` and
 `config`, ships genuine sqlc output plus a pinned sqlc/goose tool module, and

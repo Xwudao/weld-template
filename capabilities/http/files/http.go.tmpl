@@ -3,28 +3,44 @@
 //
 // The base CLI never imports this package. "weld add" installs the http
 // capability (with any other capability that requires it), and capabilities
-// register their routes through Handler rather than at init time.
+// register their routes through Handler rather than at init time. The
+// middlewares themselves, and the JSON helpers the handlers use, live in
+// internal/httpx; this package composes them.
 package httpserver
 
 import (
+	"log/slog"
 	nethttp "net/http"
+
+	"__module__/internal/httpx"
 )
 
 // Route installs one capability's routes on the application mux.
 type Route func(mux *nethttp.ServeMux)
 
+// Chain applies the application middleware chain to handler.
+//
+// It is the single composition point for middleware: NewHandler and Handler use
+// it for the plain serve command, and the Loom graph wraps the mux it builds
+// itself with it, so both compositions serve identical middleware semantics.
+// The stack it applies is declared in middleware.go, the stable project-owned
+// configuration file.
+func Chain(logger *slog.Logger, handler nethttp.Handler) nethttp.Handler {
+	return httpx.Chain(middlewareChain(logger)...)(handler)
+}
+
 // NewHandler builds a handler from the given routes.
 //
 // It is the injectable seam for tests: pass routes directly to exercise the mux
-// without installing a capability or opening a socket. Production code calls
-// Handler, which supplies the routes contributed through the weld:routes
-// extension point below.
-func NewHandler(routes ...Route) nethttp.Handler {
+// — and the real middleware chain — without installing a capability or opening
+// a socket. Production code calls Handler, which supplies the routes
+// contributed through the weld:routes extension point below.
+func NewHandler(logger *slog.Logger, routes ...Route) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	for _, route := range routes {
 		route(mux)
 	}
-	return mux
+	return Chain(logger, mux)
 }
 
 // Handler returns the application handler composed from every capability
@@ -37,11 +53,13 @@ func NewHandler(routes ...Route) nethttp.Handler {
 // mounted on "/" that must not answer API paths excludes them itself (see
 // internal/web) instead of relying on that precedence.
 //
-// With no capability installed, the mux serves nothing and returns 404 for
-// every request.
-func Handler() nethttp.Handler {
+// The logger is injected so the middleware chain records through the one
+// application logger; a nil logger is accepted and simply silences AccessLog and
+// Recover. With no capability installed, the mux serves nothing and returns 404
+// for every request.
+func Handler(logger *slog.Logger) nethttp.Handler {
 	var routes []Route
 	// weld:routes:begin
 	// weld:routes:end
-	return NewHandler(routes...)
+	return NewHandler(logger, routes...)
 }

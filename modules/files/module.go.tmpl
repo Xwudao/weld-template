@@ -10,6 +10,12 @@
 // and is not persistence; replace the body of NewService in service.go with
 // your own implementation.
 //
+// The handler writes responses through internal/httpx, the shared toolkit the
+// built-in API also uses: httpx.JSON wraps a value in the {code,msg,data}
+// envelope and httpx.Error writes an error envelope with data null. Use
+// httpx.RawText, httpx.Bytes or httpx.NoContent for a response that must stay
+// unwrapped.
+//
 // Wiring depends on how the project was built when the module was added:
 //
 //   - without Loom, internal/httpserver/__modname___route.go builds the service
@@ -22,8 +28,9 @@
 package __modname__
 
 import (
-	"encoding/json"
 	nethttp "net/http"
+
+	"__module__/internal/httpx"
 )
 
 // RoutePrefix is the URL path this module serves. It owns one segment under the
@@ -43,15 +50,9 @@ func handle(service Service) nethttp.HandlerFunc {
 	return func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		response, err := service.Greet(r.Context(), Request{Name: r.URL.Query().Get("name")})
 		if err != nil {
-			writeJSON(w, nethttp.StatusInternalServerError, errorResponse{Error: "greeting failed"})
+			httpx.Error(w, nethttp.StatusInternalServerError, "greeting failed")
 			return
 		}
-		writeJSON(w, nethttp.StatusOK, response)
+		httpx.JSON(w, nethttp.StatusOK, response)
 	}
-}
-
-func writeJSON(w nethttp.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }

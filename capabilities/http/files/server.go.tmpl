@@ -17,8 +17,11 @@ const shutdownTimeout = 10 * time.Second
 
 // NewServer builds the HTTP server for handler without starting it.
 //
-// It is separate from Serve so tests can inspect the configured server without
-// binding a socket.
+// handler is expected to already carry the application middleware chain, which
+// Chain applies; NewHandler and the Loom graph both build their handler through
+// Chain, so the plain serve command and the Loom composition serve identical
+// middleware. NewServer is separate from Serve so tests can inspect the
+// configured server without binding a socket.
 func NewServer(addr string, handler nethttp.Handler) *nethttp.Server {
 	return &nethttp.Server{
 		Addr:              addr,

@@ -168,7 +168,7 @@ func serveWithContext(ctx context.Context, cfg *config.Config, listenAddr string
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
 	serveFailed := make(chan error, 1)
-	go func() { serveFailed <- httpserver.Serve(serveCtx, listenAddr, listener, httpserver.Handler()) }()
+	go func() { serveFailed <- httpserver.Serve(serveCtx, listenAddr, listener, httpserver.Handler(logger)) }()
 
 	var serveErr error
 	select {

@@ -10,10 +10,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-{{- if or (.Caps.Has "api") .Modules}}
 	nethttp "net/http"
 	"net/http/httptest"
-{{- end}}
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +103,20 @@ func newServerForTest(t *testing.T, lifecycle *loom.Lifecycle, addr string, logg
 // on output.
 func discardLogger() *slog.Logger {
 	return logging.New(io.Discard, logging.TextFormat, nil)
+}
+
+// TestComposedServerAppliesMiddleware proves the Loom graph serves the same
+// middleware chain as the plain serve command: the graph wraps its mux with
+// httpserver.Chain, so even a not-found response carries a request id. It needs
+// no socket.
+func TestComposedServerAppliesMiddleware(t *testing.T) {
+	lifecycle := loom.NewLifecycle()
+	server := newServerForTest(t, lifecycle, "127.0.0.1:0", discardLogger())
+	recorder := httptest.NewRecorder()
+	server.HTTP.Handler.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/does-not-exist", nil))
+	if recorder.Header().Get("X-Request-Id") == "" {
+		t.Fatal("the Loom composition did not apply the middleware chain")
+	}
 }
 
 // TestServerBindFailureFailsStart proves a port already in use fails Start
@@ -296,20 +308,35 @@ func TestNewPoolParsesWithoutConnecting(t *testing.T) {
 func TestComposedMuxServesAPIWithoutSocket(t *testing.T) {
 	mux := newMux(api.NewService(){{range .Modules}}, {{.Name}}.NewService(){{end}})
 	body := `{"name":"widget","quantity":2,"status":"active"}`
+	request := httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodPost, "/api/items", strings.NewReader(body)))
+	mux.ServeHTTP(recorder, request)
 	if recorder.Code != nethttp.StatusCreated {
 		t.Fatalf("POST /api/items = %d: %s", recorder.Code, recorder.Body)
 	}
 	var created api.ItemResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
-		t.Fatalf("decode response: %v", err)
+	if err := json.Unmarshal(envelopeData(t, recorder.Body.Bytes()), &created); err != nil {
+		t.Fatalf("decode response data: %v", err)
 	}
 	recorder = httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(nethttp.MethodGet, "/api/items/"+created.ID, nil))
 	if recorder.Code != nethttp.StatusOK {
 		t.Fatalf("GET /api/items/%s = %d", created.ID, recorder.Code)
 	}
+}
+
+// envelopeData returns the data member of a {code,msg,data} response body, so a
+// test can decode the payload the shared httpx envelope wraps.
+func envelopeData(t *testing.T, raw []byte) json.RawMessage {
+	t.Helper()
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	return envelope.Data
 }
 
 // TestComposedServerServesInMemoryAPI proves serving needs no database: the
@@ -328,8 +355,8 @@ func TestComposedServerServesInMemoryAPI(t *testing.T) {
 	base := "http://" + server.listener.Addr().String()
 	created := postJSON(t, base+"/api/items", `{"name":"widget","quantity":2,"status":"active"}`)
 	var item api.ItemResponse
-	if err := json.Unmarshal(created, &item); err != nil {
-		t.Fatalf("decode create response: %v", err)
+	if err := json.Unmarshal(envelopeData(t, created), &item); err != nil {
+		t.Fatalf("decode create response data: %v", err)
 	}
 	if item.ID == "" || item.Name != "widget" {
 		t.Fatalf("created = %+v", item)

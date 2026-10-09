@@ -668,6 +668,124 @@ func TestHTTPCapabilityInjectsLogger(t *testing.T) {
 // TestLoomCapabilityBindsLogger guards the Loom logging wiring: the graph
 // provides a *slog.Logger, the managed server consumes it, and the serve
 // command leaves startup/shutdown logging to the lifecycle.
+// TestHTTPCapabilityShipsTheHelperToolkit guards the shared HTTP layer: the http
+// capability ships internal/httpx (envelope writers, JSON binding, middleware)
+// and the project-owned middleware configuration file, and the toolkit stays
+// free of go-validate, which remains a concern of the api capability.
+func TestHTTPCapabilityShipsTheHelperToolkit(t *testing.T) {
+	d := readDescriptor(t, "http")
+	paths := map[string]string{}
+	for _, file := range d.Files {
+		paths[file.Path] = file.Source
+	}
+	for _, want := range []string{
+		"internal/httpx/httpx.go",
+		"internal/httpx/bind.go",
+		"internal/httpx/middleware.go",
+		"internal/httpx/httpx_test.go",
+		"internal/httpx/bind_test.go",
+		"internal/httpx/middleware_test.go",
+		"internal/httpserver/middleware.go",
+	} {
+		if _, ok := paths[want]; !ok {
+			t.Errorf("http capability does not ship %s", want)
+		}
+	}
+
+	read := func(source string) string {
+		raw, err := fs.ReadFile(FS(), path.Join("capabilities/http", source))
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		return string(raw)
+	}
+
+	httpxGo := read(paths["internal/httpx/httpx.go"])
+	for _, want := range []string{
+		"type Envelope struct",
+		"func JSON(",
+		"func Error(",
+		"func RawJSON(",
+		"func RawText(",
+		"func Bytes(",
+		"func NoContent(",
+	} {
+		if !strings.Contains(httpxGo, want) {
+			t.Errorf("httpx.go is missing %q", want)
+		}
+	}
+	bindGo := read(paths["internal/httpx/bind.go"])
+	for _, want := range []string{"func DecodeJSON[", "func QueryInt(", "type DecodeError struct"} {
+		if !strings.Contains(bindGo, want) {
+			t.Errorf("bind.go is missing %q", want)
+		}
+	}
+	middlewareGo := read(paths["internal/httpx/middleware.go"])
+	for _, want := range []string{"type Middleware func(http.Handler) http.Handler", "func Chain(", "func RequestID()", "func AccessLog(", "func Recover("} {
+		if !strings.Contains(middlewareGo, want) {
+			t.Errorf("httpx middleware.go is missing %q", want)
+		}
+	}
+	// Binding takes a validator callback rather than importing go-validate, so
+	// the toolkit stays usable by a capability that does not install api.
+	for _, source := range []string{
+		paths["internal/httpx/httpx.go"],
+		paths["internal/httpx/bind.go"],
+		paths["internal/httpx/middleware.go"],
+	} {
+		if strings.Contains(read(source), "github.com/Xwudao/go-validate") {
+			t.Errorf("http payload %s imports go-validate; binding must take a validator callback", source)
+		}
+	}
+
+	config := read(paths["internal/httpserver/middleware.go"])
+	for _, want := range []string{"func middlewareChain(", "httpx.RequestID()", "httpx.AccessLog(", "httpx.Recover(", "outer-to-inner"} {
+		if !strings.Contains(config, want) {
+			t.Errorf("httpserver/middleware.go is missing %q", want)
+		}
+	}
+	if !strings.Contains(read(paths["internal/httpserver/http.go"]), "httpx.Chain(middlewareChain(") {
+		t.Error("http.go does not compose the configured middleware chain")
+	}
+}
+
+// TestCapabilitiesShareTheResponseEnvelope guards the wire contract: the
+// built-in API and the generated business module both write through the httpx
+// envelope, the OpenAPI document is served raw, and the document describes the
+// envelope the handlers write.
+func TestCapabilitiesShareTheResponseEnvelope(t *testing.T) {
+	read := func(pathName string) string {
+		raw, err := fs.ReadFile(FS(), pathName)
+		if err != nil {
+			t.Fatalf("read %s: %v", pathName, err)
+		}
+		return string(raw)
+	}
+
+	handler := read("capabilities/api/files/handler.go.tmpl")
+	for _, want := range []string{"httpx.DecodeJSON(", "httpx.JSON(", "httpx.RawJSON(", "func decodeBody["} {
+		if !strings.Contains(handler, want) {
+			t.Errorf("api handler.go is missing %q", want)
+		}
+	}
+	openapi := read("capabilities/api/files/openapi.go.tmpl")
+	for _, want := range []string{"func successEnvelope(", "func errorEnvelope(", "func envelopeSchema("} {
+		if !strings.Contains(openapi, want) {
+			t.Errorf("api openapi.go is missing %q", want)
+		}
+	}
+	module := read("modules/files/module.go.tmpl")
+	for _, want := range []string{"httpx.JSON(", "httpx.Error("} {
+		if !strings.Contains(module, want) {
+			t.Errorf("the module template is missing %q", want)
+		}
+	}
+	// The OpenAPI artifact is a complete document for tooling, served unwrapped.
+	if strings.Contains(handler, "writeJSON(") {
+		t.Error("api handler.go still hand-rolls its own JSON writer")
+	}
+}
+
 func TestLoomCapabilityBindsLogger(t *testing.T) {
 	graph, err := fs.ReadFile(FS(), "capabilities/loom/files/di.go.tmpl")
 	if err != nil {

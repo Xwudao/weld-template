@@ -7,13 +7,9 @@ type Request struct {
 	Name string
 }
 
-// Response is the module's typed output, serialized to JSON by the handler.
+// Response is the module's typed output. The handler wraps it in the shared
+// {code,msg,data} envelope from internal/httpx before it is written.
 type Response struct {
 	Module  string `json:"module"`
 	Message string `json:"message"`
-}
-
-// errorResponse is the body of a failed request.
-type errorResponse struct {
-	Error string `json:"error"`
 }

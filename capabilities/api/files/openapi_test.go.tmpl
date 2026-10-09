@@ -64,6 +64,36 @@ func TestDocumentMapsSpecConstraints(t *testing.T) {
 	}
 }
 
+// TestDocumentWrapsResponseData proves the documented responses match the wire
+// format: a success response wraps the operation's schema under data, and an
+// error response is the envelope with data null.
+func TestDocumentWrapsResponseData(t *testing.T) {
+	document, err := Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	create := document.Paths["/api/items"]["post"]
+	success := create.Responses["201"].Content["application/json"].Schema
+	if success.Type != "object" {
+		t.Fatalf("success schema = %+v, want an envelope object", success)
+	}
+	if got := strings.Join(success.Required, ","); got != "code,msg,data" {
+		t.Fatalf("envelope required = %q, want code,msg,data", got)
+	}
+	if success.Properties["code"].Type != "integer" || success.Properties["msg"].Type != "string" {
+		t.Fatalf("envelope fields = %+v", success.Properties)
+	}
+	data := success.Properties["data"]
+	if data.Type != "object" || data.Properties["name"] == nil {
+		t.Fatalf("success data = %+v, want the ItemResponse object", data)
+	}
+	failure := create.Responses["400"].Content["application/json"].Schema
+	failureData := failure.Properties["data"]
+	if len(failureData.Enum) != 1 || failureData.Enum[0] != nil {
+		t.Fatalf("error data = %+v, want the single-value enum [null]", failureData)
+	}
+}
+
 func TestDocumentExportsEnumFromSpec(t *testing.T) {
 	// The enum is read back from the very Spec used for validation.
 	schema, err := (CreateItemRequest{}).Spec().Schema()
@@ -132,7 +162,6 @@ func TestSpecCoversEveryJSONField(t *testing.T) {
 	}{
 		{"CreateItemRequest", CreateItemRequest{}},
 		{"ItemResponse", ItemResponse{}},
-		{"ErrorResponse", ErrorResponse{}},
 		{"listItemsQuery", listItemsQuery{}},
 	}
 	for _, dto := range dtos {

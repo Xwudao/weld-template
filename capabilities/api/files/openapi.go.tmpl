@@ -69,11 +69,12 @@ type QueryParameter struct {
 	Spec func() validate.Spec
 }
 
-// OperationError is one non-success response and its body schema.
+// OperationError is one non-success response. Its body is the shared
+// {code,msg,data} envelope with data null, so only the transport status and a
+// description are needed.
 type OperationError struct {
 	Status      int
 	Description string
-	Schema      schemaFunc
 }
 
 // route is the ServeMux pattern for the operation.
@@ -95,8 +96,8 @@ func operations() []Operation {
 			SuccessStatus: http.StatusCreated,
 			Success:       objectOf[ItemResponse](),
 			Errors: []OperationError{
-				{Status: http.StatusBadRequest, Description: "Invalid request", Schema: objectOf[ErrorResponse]()},
-				{Status: http.StatusInternalServerError, Description: "Internal error", Schema: objectOf[ErrorResponse]()},
+				{Status: http.StatusBadRequest, Description: "Invalid request"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
 			},
 			handle: createItemHandler,
 		},
@@ -111,8 +112,8 @@ func operations() []Operation {
 			SuccessStatus: http.StatusOK,
 			Success:       arrayOf[ItemResponse](),
 			Errors: []OperationError{
-				{Status: http.StatusBadRequest, Description: "Invalid request", Schema: objectOf[ErrorResponse]()},
-				{Status: http.StatusInternalServerError, Description: "Internal error", Schema: objectOf[ErrorResponse]()},
+				{Status: http.StatusBadRequest, Description: "Invalid request"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
 			},
 			handle: listItemsHandler,
 		},
@@ -125,8 +126,8 @@ func operations() []Operation {
 			SuccessStatus: http.StatusOK,
 			Success:       objectOf[ItemResponse](),
 			Errors: []OperationError{
-				{Status: http.StatusNotFound, Description: "Item not found", Schema: objectOf[ErrorResponse]()},
-				{Status: http.StatusInternalServerError, Description: "Internal error", Schema: objectOf[ErrorResponse]()},
+				{Status: http.StatusNotFound, Description: "Item not found"},
+				{Status: http.StatusInternalServerError, Description: "Internal error"},
 			},
 			handle: getItemHandler,
 		},
@@ -310,8 +311,8 @@ func validateOperation(operation Operation, seen map[string]bool) error {
 		return fmt.Errorf("operation %q: a success response is required", operation.OperationID)
 	}
 	for _, response := range operation.Errors {
-		if response.Status == 0 || response.Schema == nil {
-			return fmt.Errorf("operation %q: error responses need a status and a schema", operation.OperationID)
+		if response.Status == 0 {
+			return fmt.Errorf("operation %q: error responses need a status", operation.OperationID)
 		}
 	}
 	return nil
@@ -367,18 +368,42 @@ func buildOperation(operation Operation) (*OperationDocument, error) {
 		}
 		document.Responses[strconv.Itoa(operation.SuccessStatus)] = ResponseDocument{
 			Description: "Success",
-			Content:     map[string]MediaType{"application/json": {Schema: schema}},
+			Content:     map[string]MediaType{"application/json": {Schema: successEnvelope(schema)}},
 		}
 	}
 	for _, response := range operation.Errors {
-		schema, err := response.Schema()
-		if err != nil {
-			return nil, fmt.Errorf("response %d: %w", response.Status, err)
-		}
 		document.Responses[strconv.Itoa(response.Status)] = ResponseDocument{
 			Description: response.Description,
-			Content:     map[string]MediaType{"application/json": {Schema: schema}},
+			Content:     map[string]MediaType{"application/json": {Schema: errorEnvelope()}},
 		}
 	}
 	return document, nil
+}
+
+// successEnvelope wraps a success data schema in the {code,msg,data} envelope
+// the handler writes, so the documented response matches the wire format: data
+// carries the operation's own schema and code repeats the transport status.
+func successEnvelope(data *JSONSchema) *JSONSchema {
+	return envelopeSchema(data)
+}
+
+// errorEnvelope is the envelope every non-success response carries: code repeats
+// the transport status, msg is a short client-safe message and data is always
+// null. data is documented as the single-value enum [null], which is the precise
+// JSON Schema 2020-12 form (a bare type: null is not accepted by every OpenAPI
+// 3.1 parser).
+func errorEnvelope() *JSONSchema {
+	return envelopeSchema(&JSONSchema{Enum: []any{nil}})
+}
+
+func envelopeSchema(data *JSONSchema) *JSONSchema {
+	return &JSONSchema{
+		Type: "object",
+		Properties: map[string]*JSONSchema{
+			"code": {Type: "integer"},
+			"msg":  {Type: "string"},
+			"data": data,
+		},
+		Required: []string{"code", "msg", "data"},
+	}
 }

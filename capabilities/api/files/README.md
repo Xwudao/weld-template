@@ -7,6 +7,24 @@ constraints. `operations()` is the single route table behind both the mux
 registration (`Register`) and the document (`Document`, served at
 `GET /api/openapi.json`).
 
+## Request and response format
+
+Request bodies are the DTOs themselves. Responses are wrapped in the shared
+`{code, msg, data}` envelope from `internal/httpx`:
+
+- `code` repeats the HTTP transport status (200, 201, 400, 404, 500) rather than
+  inventing a separate business code, so a client may read either;
+- `msg` is `success` for a success response and a short, client-safe message for
+  an error;
+- `data` is the payload, or `null` on every error.
+
+The handler binds and validates with `httpx.DecodeJSON`, passing
+`Spec().Validate` as the code-first validator callback, so `internal/httpx`
+stays free of the go-validate dependency while this package keeps it.
+`GET /api/openapi.json` is the one exception: it is served raw with
+`httpx.RawJSON`, because a spec generator must receive the OpenAPI document
+itself. The document's response schemas describe the same envelope.
+
 > **Development demo:** the default `Service` is `NewService()`, an in-memory
 > service. Items live in the process only and are lost on restart, and serving
 > the API needs no database. Installing the `db` capability does **not** switch

@@ -12,6 +12,11 @@ An HTTP business module wired under `GET /api/__modname__`:
 - `service.go` — the `Service` interface and the default `NewService`.
 - `module.go` — `Register` and the HTTP handler.
 
+The handler writes through `internal/httpx`, the shared toolkit: `httpx.JSON`
+wraps a value in the `{code, msg, data}` envelope and `httpx.Error` writes an
+error envelope with `data: null`. Use `httpx.RawText`, `httpx.Bytes` or
+`httpx.NoContent` for a response that must stay unwrapped.
+
 ## Replaceable example, not persistence
 
 The default `Service` is an in-memory development demo. It writes nothing to

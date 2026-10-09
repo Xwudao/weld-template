@@ -324,10 +324,14 @@ func NewServer(
 	{{.Name}}Service {{.Name}}.Service,{{end}}
 ) (*Server, error) {
 	server := &Server{
-		HTTP: httpserver.NewServer(cfg.HTTP.Addr, newMux({{if .Caps.Has "api"}}
+		// The composed mux is wrapped with the same middleware chain the plain
+		// serve command uses (httpserver.Chain, declared in
+		// internal/httpserver/middleware.go), so both compositions serve identical
+		// middleware semantics.
+		HTTP: httpserver.NewServer(cfg.HTTP.Addr, httpserver.Chain(logger, newMux({{if .Caps.Has "api"}}
 			service,{{end}}{{range .Modules}}
 			{{.Name}}Service,{{end}}
-		)),
+		))),
 		logger: logger,
 		fail:   make(chan error, 1),
 	}

@@ -8,7 +8,8 @@
 //
 // The DTOs carry JSON serialization tags only. Validation rules live in one
 // place, the Spec method, which feeds both runtime validation and the OpenAPI
-// constraints.
+// constraints. Responses are wrapped in the shared {code,msg,data} envelope by
+// internal/httpx; request bodies are the DTOs themselves, unwrapped.
 package api
 
 import (
@@ -85,16 +86,6 @@ func (r ItemResponse) Spec() validate.Spec {
 		validate.Int("quantity", r.Quantity, validate.MinValue(1)),
 		validate.String("status", string(r.Status), validate.Enum(itemStatusValues()...)),
 	}
-}
-
-// ErrorResponse is the body of every non-success response.
-type ErrorResponse struct {
-	Error string `json:"error"`
-}
-
-// Spec is the error body contract.
-func (r ErrorResponse) Spec() validate.Spec {
-	return validate.Spec{validate.String("error", r.Error, validate.NonEmpty())}
 }
 
 // List limits for GET /api/items.

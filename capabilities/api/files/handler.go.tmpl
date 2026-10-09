@@ -1,16 +1,20 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/Xwudao/go-validate"
+
+	"__module__/internal/httpx"
 )
 
 // openAPIPath is the endpoint that serves the generated document.
 const openAPIPath = "/api/openapi.json"
+
+// maxBodyBytes bounds a JSON request body. It is the shared default, so every
+// generated handler binds bodies the same way.
+const maxBodyBytes = httpx.DefaultMaxBytes
 
 // Handler returns the API as a plain http.Handler with the given service.
 //
@@ -39,17 +43,22 @@ type speced interface {
 	Spec() validate.Spec
 }
 
-// decodeBody decodes and validates a JSON request body from the same Spec used
-// for documentation. A decode or validation failure is a 400.
+// decodeBody decodes and validates a JSON request body using the shared binding
+// helper and the same Spec used for documentation.
+//
+// httpx owns the transport checks — content type, body size, JSON syntax, a
+// second value or unknown field — and maps each to a real transport status; the
+// Spec is passed as the code-first validator callback, so this package keeps
+// its go-validate dependency while httpx stays free of it. Any failure is
+// written to w and reported false.
 func decodeBody[T speced](w http.ResponseWriter, r *http.Request) (T, bool) {
-	var body T
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "request body is not valid JSON")
-		return body, false
-	}
-	if err := body.Spec().Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return body, false
+	var zero T
+	body, err := httpx.DecodeJSON(r, maxBodyBytes, func(value T) error {
+		return value.Spec().Validate()
+	})
+	if err != nil {
+		httpx.WriteError(w, err)
+		return zero, false
 	}
 	return body, true
 }
@@ -65,35 +74,35 @@ func createItemHandler(service Service) http.HandlerFunc {
 			writeServiceError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, item)
+		httpx.JSON(w, http.StatusCreated, item)
 	}
 }
 
 func listItemsHandler(service Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := listItemsQuery{}
-		if raw := r.URL.Query().Get("limit"); raw != "" {
-			limit, err := strconv.Atoi(raw)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "limit must be an integer")
-				return
-			}
+		limit, present, err := httpx.QueryInt(r, "limit")
+		if err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		if present {
 			query.Limit = &limit
 		}
 		if err := query.Spec().Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			httpx.Error(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		limit := defaultLimit
-		if query.Limit != nil {
-			limit = *query.Limit
+		effective := defaultLimit
+		if present {
+			effective = limit
 		}
-		items, err := service.List(r.Context(), limit)
+		items, err := service.List(r.Context(), effective)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		httpx.JSON(w, http.StatusOK, items)
 	}
 }
 
@@ -104,38 +113,32 @@ func getItemHandler(service Service) http.HandlerFunc {
 			writeServiceError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, item)
+		httpx.JSON(w, http.StatusOK, item)
 	}
 }
 
 // openAPIHandler serves the OpenAPI 3.1 document. It is rebuilt per request so
 // a contract error surfaces as a 500 rather than a silently stale document.
-func openAPIHandler(w http.ResponseWriter, r *http.Request) {
+//
+// The document is a complete artifact for tooling to consume, so it is written
+// raw with httpx.RawJSON and is deliberately not wrapped in the response
+// envelope: a spec generator must receive the OpenAPI document itself.
+func openAPIHandler(w http.ResponseWriter, _ *http.Request) {
 	document, err := Document()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "openapi document unavailable")
+		httpx.Error(w, http.StatusInternalServerError, "openapi document unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, document)
+	httpx.RawJSON(w, http.StatusOK, document)
 }
 
-// writeServiceError maps a Service error to a response. Unknown errors are a
-// generic 500 and do not leak the internal message.
+// writeServiceError maps a Service error to a response envelope. ErrNotFound is
+// a 404; every other error is a generic 500 and never leaks the internal
+// message.
 func writeServiceError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrNotFound) {
-		writeError(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeError(w, http.StatusInternalServerError, "internal error")
-}
-
-// writeError writes the shared ErrorResponse body.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, ErrorResponse{Error: message})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	httpx.Error(w, http.StatusInternalServerError, "internal error")
 }
