@@ -1,4 +1,8 @@
-# weld-template
+# weld-template (legacy module)
+
+Template development has moved into [`weld/internal/weldtemplate`](https://github.com/Xwudao/weld/tree/main/internal/weldtemplate).
+This repository remains available for released weld versions up to v0.1.1;
+new changes should be made in the single `weld` repository.
 
 Declarative payloads for the [`weld`](../weld) progressive Go scaffold.
 
